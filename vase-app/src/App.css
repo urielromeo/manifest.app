@@ -40,3 +40,13 @@
 .read-the-docs {
   color: #888;
 }
+
+/* Responsive layout for side panels / bottom bar */
+@media (max-width: 768px) {
+  .desktop-sidebar { display: none !important; }
+  .mobile-bottom-bar { display: flex !important; }
+}
+@media (min-width: 769px) {
+  .desktop-sidebar { display: flex !important; }
+  .mobile-bottom-bar { display: none !important; }
+}
