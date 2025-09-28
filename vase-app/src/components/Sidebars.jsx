@@ -15,30 +15,36 @@ import DebugPanel from "./panels/DebugPanel.jsx";
  * Forwards ref to the mobile bottom bar container so parent can measure height.
  */
 const Sidebars = React.forwardRef(function Sidebars({
-  setTextureSources,
-  setActiveBaseLayer,
-  setBaseColor,
-  setTitle3D,
+  activeVaseIndex,
+  titles3D,
+  setTextureSourcesForVase,
+  setActiveBaseLayerForVase,
+  setBaseColorForVase,
+  setTitle3DForVase,
   activeAction,
   setActiveAction,
 }, bottomBarRef) {
   const commonPanels = (
     <>
+      <div style={{ color: 'white', fontSize: 12, opacity: 0.8 }}>Active Vase: #{activeVaseIndex}</div>
       <BaseColorSetter
-        onBaseCanvas={(c) => setTextureSources(p => ({ ...p, base: c }))}
-        clearOthers={() => setActiveBaseLayer('base')}
-        onBaseColor={setBaseColor}
+        onBaseCanvas={(c) => setTextureSourcesForVase(activeVaseIndex, s => ({ ...s, base: c }))}
+        clearOthers={() => setActiveBaseLayerForVase(activeVaseIndex, 'base')}
+        onBaseColor={(col) => setBaseColorForVase(activeVaseIndex, col)}
       />
       <Uploader
-        onUploadCanvas={(c) => setTextureSources(p => ({ ...p, upload: c }))}
-        clearOthers={() => setActiveBaseLayer('upload')}
+        onUploadCanvas={(c) => setTextureSourcesForVase(activeVaseIndex, s => ({ ...s, upload: c }))}
+        clearOthers={() => setActiveBaseLayerForVase(activeVaseIndex, 'upload')}
       />
       <CameraCapture
-        onCameraCanvas={(c) => setTextureSources(p => ({ ...p, camera: c }))}
-        clearOthers={() => setActiveBaseLayer('camera')}
+        onCameraCanvas={(c) => setTextureSourcesForVase(activeVaseIndex, s => ({ ...s, camera: c }))}
+        clearOthers={() => setActiveBaseLayerForVase(activeVaseIndex, 'camera')}
       />
-      <VaseTextSetter onTextCanvas={(c) => setTextureSources(p => ({ ...p, text: c }))} />
-      <TitleSetter onSetTitle={setTitle3D} />
+      <VaseTextSetter onTextCanvas={(c) => setTextureSourcesForVase(activeVaseIndex, s => ({ ...s, text: c }))} />
+      <TitleSetter
+        initialTitle={titles3D[activeVaseIndex]}
+        onSetTitle={(title) => setTitle3DForVase(activeVaseIndex, title)}
+      />
       <ActionsPanel
         activeAction={activeAction}
         setActiveAction={setActiveAction}

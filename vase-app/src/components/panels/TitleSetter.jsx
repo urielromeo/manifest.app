@@ -1,11 +1,16 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 
 // TileSetter: lets user set a 3D title below the vase.
 // Props:
 // - onSetTitle(title)
 
-export default function TitleSetter({ onSetTitle }) {
-  const [title, setTitle] = useState("");
+export default function TitleSetter({ onSetTitle, initialTitle = "" }) {
+  const [title, setTitle] = useState(initialTitle);
+
+  // Sync when active vase changes
+  useEffect(() => {
+    setTitle(initialTitle);
+  }, [initialTitle]);
 
   const applyTitle = () => {
     const clean = (title || "").slice(0, 32);

@@ -47,16 +47,19 @@ function CameraResetAnimator({ controlsRef, resetRef, onDone }) {
 }
 
 export default function App() {
-  // Unified texture sources (preparing for multi-vase extensibility)
-  const [textureSources, setTextureSources] = useState({
-    base: null,
-    upload: null,
-    camera: null,
-    text: null, // overlay layer (never the primary base layer)
-  });
-  const [activeBaseLayer, setActiveBaseLayer] = useState('base'); // 'base' | 'upload' | 'camera'
-  const [baseColor, setBaseColor] = useState("#ffffff");
-  const [title3D, setTitle3D] = useState("");
+  // Per-vase texture source stacks & metadata
+  const [textureSourcesList, setTextureSourcesList] = useState(
+    () => Array.from({ length: VASE_COUNT }, () => ({ base: null, upload: null, camera: null, text: null }))
+  );
+  const [activeBaseLayers, setActiveBaseLayers] = useState(
+    () => Array.from({ length: VASE_COUNT }, () => 'base')
+  );
+  const [baseColors, setBaseColors] = useState(
+    () => Array.from({ length: VASE_COUNT }, () => '#ffffff')
+  );
+  const [titles3D, setTitles3D] = useState(
+    () => Array.from({ length: VASE_COUNT }, () => '')
+  );
   const [activeAction, setActiveAction] = useState(null);
   const [currentZoom, setCurrentZoom] = useState(1);
   const [activeVaseIndex, setActiveVaseIndex] = useState(0); // which vase camera is focused on
@@ -146,18 +149,34 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [focusVase, activeVaseIndex]);
 
-  // Map active base layer into priority slots expected by hook (camera > upload > base)
-  const baseParam = activeBaseLayer === 'base' ? textureSources.base : null;
-  const uploadParam = activeBaseLayer === 'upload' ? textureSources.upload : null;
-  const cameraParam = activeBaseLayer === 'camera' ? textureSources.camera : null;
+  // Helpers to update per-vase structures
+  const setTextureSourcesForVase = useCallback((index, updater) => {
+    setTextureSourcesList(prev => prev.map((entry, i) => i === index ? updater(entry) : entry));
+  }, []);
+  const setActiveBaseLayerForVase = useCallback((index, layer) => {
+    setActiveBaseLayers(prev => prev.map((l, i) => i === index ? layer : l));
+  }, []);
+  const setBaseColorForVase = useCallback((index, color) => {
+    setBaseColors(prev => prev.map((c, i) => i === index ? color : c));
+  }, []);
+  const setTitle3DForVase = useCallback((index, title) => {
+    setTitles3D(prev => prev.map((t, i) => i === index ? title : t));
+  }, []);
 
-  const { texture } = useComposedTexture({
-    base: baseParam,
-    upload: uploadParam,
-    camera: cameraParam,
-    text: textureSources.text,
-    fallbackColor: '#f8f8f8',
-    size: 1024,
+  // Compose textures for each vase (could optimize with memoization; fine for small counts)
+  const composedTextures = textureSourcesList.map((srcs, i) => {
+    const activeLayer = activeBaseLayers[i];
+    const baseParam = activeLayer === 'base' ? srcs.base : null;
+    const uploadParam = activeLayer === 'upload' ? srcs.upload : null;
+    const cameraParam = activeLayer === 'camera' ? srcs.camera : null;
+    return useComposedTexture({
+      base: baseParam,
+      upload: uploadParam,
+      camera: cameraParam,
+      text: srcs.text,
+      fallbackColor: '#f8f8f8',
+      size: 1024,
+    }).texture;
   });
 
   const defaultTexture = useMemo(() => {
@@ -278,10 +297,12 @@ export default function App() {
     <div style={{ width: "100vw", height: "100svh", overflow: "hidden" }}>
       <Sidebars
         ref={bottomBarRef}
-        setTextureSources={setTextureSources}
-        setActiveBaseLayer={setActiveBaseLayer}
-        setBaseColor={setBaseColor}
-        setTitle3D={setTitle3D}
+        activeVaseIndex={activeVaseIndex}
+        titles3D={titles3D}
+        setTextureSourcesForVase={setTextureSourcesForVase}
+        setActiveBaseLayerForVase={setActiveBaseLayerForVase}
+        setBaseColorForVase={setBaseColorForVase}
+        setTitle3DForVase={setTitle3DForVase}
         activeAction={activeAction}
         setActiveAction={setActiveAction}
       />
@@ -339,15 +360,22 @@ export default function App() {
                 })}
               >
                 <VaseModel
-                  texture={texture || defaultTexture}
+                  texture={composedTextures[i] || defaultTexture}
                   rotateWithPointer={isActive}
                   onVasePointerDown={isActive ? handleVasePointerDown : undefined}
                 />
+                {titles3D[i] && (
+                  <FloatingTitle3D
+                    title={titles3D[i]}
+                    color={baseColors[i]}
+                    position={[0, -8, 0]}
+                  />
+                )}
               </group>
             );
           })}
         </Suspense>
-        <FloatingTitle3D title={title3D} color={baseColor} />
+        {/* Removed single global title; per-vase titles handled inline */}
           <OrbitControls
             ref={controlsRef}
             makeDefault
