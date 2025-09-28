@@ -25,7 +25,17 @@ function CameraResetAnimator({ controlsRef, resetRef, onDone }) {
     controlsRef.current.target.lerpVectors(data.fromTarget, data.toTarget, k);
     controlsRef.current.update();
 
-    if (t >= 1) {
+    // Early finish tolerance: once we're past a minimum progress and within distance epsilon, snap & finish.
+    if (
+      t >= 1 ||
+      (t >= data.minProgressForEarlyEnd &&
+        camera.position.distanceToSquared(data.toPos) <= data.posEpsSq &&
+        controlsRef.current.target.distanceToSquared(data.toTarget) <= data.targetEpsSq)
+    ) {
+      // Snap to exact final values to avoid residual drift
+      camera.position.copy(data.toPos);
+      controlsRef.current.target.copy(data.toTarget);
+      controlsRef.current.update();
       resetRef.current = null;
       onDone();
     }
@@ -53,8 +63,6 @@ export default function App() {
   // Interaction state
   const [draggingMode, setDraggingMode] = useState(null); // 'vase' | 'camera' | null
   const [isResetting, setIsResetting] = useState(false);
-  // Track if a vase pointer down has occurred this tick to avoid canvas race
-  const vasePointerActiveRef = useRef(false);
 
   const controlsRef = useRef(null);
 
@@ -79,6 +87,10 @@ export default function App() {
       toTarget: defaultTarget.current.clone(),
       elapsed: 0,
       duration: 1,
+      // Early end thresholds (tunable): bigger eps = stop sooner (less precision required)
+      posEpsSq: 0.05 * 0.05, // camera position distance tolerance squared
+      targetEpsSq: 0.025 * 0.025, // target distance tolerance squared
+      minProgressForEarlyEnd: 0.55,
     };
     setIsResetting(true);
   }, []);
@@ -157,9 +169,8 @@ export default function App() {
 
   // Pointer logic
   const handleCanvasPointerDown = useCallback(() => {
-    if (vasePointerActiveRef.current) return; // vase consumed this event
-    if (draggingMode === "vase" || isResetting) return;
-    if (draggingMode === null) setDraggingMode("camera");
+    // If we're not currently dragging the vase and not resetting, enter camera mode
+    if (draggingMode === null && !isResetting) setDraggingMode("camera");
   }, [draggingMode, isResetting]);
 
   // Global pointerup to finalize drags
@@ -171,19 +182,36 @@ export default function App() {
       } else if (draggingMode === "vase") {
         setDraggingMode(null);
       }
-      vasePointerActiveRef.current = false; // reset flag after pointer cycle
     };
     window.addEventListener("pointerup", up);
     return () => window.removeEventListener("pointerup", up);
   }, [draggingMode, startCameraReset]);
 
   const handleVasePointerDown = useCallback((e) => {
-    // Prevent the canvas onPointerDown from firing in the same tick
     if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
     if (isResetting) return;
-    vasePointerActiveRef.current = true;
     setDraggingMode("vase");
   }, [isResetting]);
+
+  // Extra safety: if pointer gets canceled or window/tab loses focus, gracefully end drag
+  useEffect(() => {
+    const cancel = () => {
+      if (draggingMode === "camera") {
+        startCameraReset();
+      } else if (draggingMode === "vase") {
+        setDraggingMode(null);
+      }
+    };
+    const handleVisibility = () => { if (document.hidden) cancel(); };
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('blur', cancel);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('blur', cancel);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [draggingMode, startCameraReset]);
 
   // Keep OrbitControls mounted & active so first pointer move rotates immediately.
   // We dynamically enable/disable rotate & pan based on draggingMode to avoid

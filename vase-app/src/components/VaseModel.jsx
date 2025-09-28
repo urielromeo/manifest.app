@@ -11,15 +11,46 @@ export const MODEL_URL = modelUrl;
 useGLTF.preload(MODEL_URL);
 
 /**
- * Hook: center an Object3D only once by shifting its position so its bounding box center is at origin.
+ * Hook: center the model for clean Y-axis rotation.
+ * Strategy:
+ *  - Compute full bounding box once.
+ *  - Shift ONLY X & Z so horizontal center sits at (0,0).
+ *  - Lift / lower Y so the base (minY) rests at y = 0 (feels grounded while spinning).
+ * This avoids wobble caused by off-axis pivot while keeping the vase "standing" instead of
+ * rotating around its vertical midpoint.
  */
-function useCenterOnce(object3D) {
+function useCenterForSpin(object3D) {
   const centeredRef = useRef(false);
   useEffect(() => {
     if (!object3D || centeredRef.current) return;
-    const box = new THREE.Box3().setFromObject(object3D);
+
+    // Aggregate bounding box across visible meshes only (ignores empties / helpers)
+    const box = new THREE.Box3();
+    let hasMesh = false;
+    object3D.traverse(child => {
+      if (child.isMesh && child.visible && child.geometry) {
+        const childBox = new THREE.Box3().setFromObject(child);
+        if (!hasMesh) {
+          box.copy(childBox);
+          hasMesh = true;
+        } else {
+          box.union(childBox);
+        }
+      }
+    });
+    if (!hasMesh) return;
+
     const center = box.getCenter(new THREE.Vector3());
-    object3D.position.sub(center);
+
+    // Shift only horizontal center
+    object3D.position.x -= center.x;
+    object3D.position.z -= center.z;
+
+    // Recompute after X/Z shift to find new minY, then lift base to y=0
+    const shiftedBox = new THREE.Box3().setFromObject(object3D);
+    const baseOffset = shiftedBox.min.y; // if negative, raise; if positive, lower
+    object3D.position.y -= baseOffset;
+
     centeredRef.current = true;
   }, [object3D]);
 }
@@ -34,6 +65,7 @@ export default function VaseModel({
   texture,
   rotateWithPointer = true,
   onVasePointerDown,
+  onVasePointerUp,
   inertialRotation = true, // enable simple momentum effect
   inertiaFriction = 0.92,  // per-frame decay factor (closer to 1 = longer spin)
   minInertiaSpeed = 0.0005 // cutoff to stop updating
@@ -60,8 +92,8 @@ export default function VaseModel({
     });
   }, [scene, texture]);
 
-  // Center the vase once so its pivot is at origin
-  useCenterOnce(scene);
+  // Center vase for stable spin (horizontal center at 0, base at y=0)
+  useCenterForSpin(scene);
 
   // Pointer drag handlers (rotate around Y axis)
   const onPointerDown = (e) => {
@@ -70,9 +102,8 @@ export default function VaseModel({
     dragState.current.dragging = true;
     dragState.current.lastX = e.clientX;
     dragState.current.lastY = e.clientY;
-    if (e.target.setPointerCapture) {
-      try { e.target.setPointerCapture(e.pointerId); } catch {}
-    }
+    // NOTE: We intentionally do NOT use pointer capture here because react-three-fiber
+    // event targets are 3D objects (not DOM nodes) causing DOMExceptions in some browsers.
   };
 
   const onPointerMove = (e) => {
@@ -94,9 +125,8 @@ export default function VaseModel({
     if (Math.abs(dragState.current.angularVelocity) < 0.0001) {
       dragState.current.angularVelocity = 0;
     }
-    if (e.target.releasePointerCapture) {
-      try { e.target.releasePointerCapture(e.pointerId); } catch {}
-    }
+    // No pointer capture to release (see note in onPointerDown).
+    onVasePointerUp?.(e);
   };
 
   // Simple per-frame inertia decay
@@ -120,9 +150,9 @@ export default function VaseModel({
         onPointerDown(e);
       }}
       onPointerMove={onPointerMove}
-      onPointerUp={endDrag}
-      onPointerOut={endDrag}
-      onPointerCancel={endDrag}
+  onPointerUp={endDrag}
+  onPointerOut={endDrag}
+  onPointerCancel={endDrag}
     >
       {scene && <primitive object={scene} />}
     </group>
