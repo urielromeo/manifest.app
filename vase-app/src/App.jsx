@@ -2,13 +2,16 @@ import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback } fr
 import "./App.css";
 import * as THREE from "three";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { OrbitControls, useGLTF, Bounds } from "@react-three/drei";
+import { OrbitControls, useGLTF } from "@react-three/drei";
 import VaseModel, { MODEL_URL } from "./components/VaseModel.jsx";
 import FloatingTitle3D from "./components/FloatingTitle3D.jsx";
 import Sidebars from './components/Sidebars.jsx';
 import useComposedTexture from './hooks/useComposedTexture.js';
 
-const BOUNDS_MARGIN = 2.15;
+const BOUNDS_MARGIN = 2.15; // (kept for potential future use)
+// Multi-vase configuration
+const VASE_COUNT = 2; // Adjust this number to render more or fewer vases
+const VASE_SPACING = 25; // Fixed X distance between consecutive vases
 
 // --- Helper component for camera reset animation ---
 const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3); // hoisted to avoid re-allocation each frame
@@ -56,6 +59,7 @@ export default function App() {
   const [title3D, setTitle3D] = useState("");
   const [activeAction, setActiveAction] = useState(null);
   const [currentZoom, setCurrentZoom] = useState(1);
+  const [activeVaseIndex, setActiveVaseIndex] = useState(0); // which vase camera is focused on
   // Mobile layout adjustment
   const bottomBarRef = useRef(null);
   const [bottomBarHeight, setBottomBarHeight] = useState(0);
@@ -72,28 +76,75 @@ export default function App() {
   const defaultDir = useRef(
     defaultCamPos.current.clone().sub(defaultTarget.current).normalize()
   );
+  // Preserve full initial offset vector (not just direction) so we can reuse exact relative framing.
+  const defaultOffset = useRef(
+    defaultCamPos.current.clone().sub(defaultTarget.current)
+  );
   const resetRef = useRef(null);
 
   const startCameraReset = useCallback(() => {
     if (!controlsRef.current) return;
-    const dist = controlsRef.current.getDistance();
-    const toPos = defaultTarget.current
-      .clone()
-      .add(defaultDir.current.clone().multiplyScalar(dist));
+    const cam = controlsRef.current.object;
+    const currentOffset = cam.position.clone().sub(controlsRef.current.target);
+    // If user has changed distance, honor new length but keep direction = defaultDir
+    const dist = currentOffset.length();
+    const toPos = defaultTarget.current.clone().add(defaultDir.current.clone().multiplyScalar(dist));
     resetRef.current = {
-      fromPos: controlsRef.current.object.position.clone(),
+      fromPos: cam.position.clone(),
       toPos,
       fromTarget: controlsRef.current.target.clone(),
       toTarget: defaultTarget.current.clone(),
       elapsed: 0,
-      duration: 1,
-      // Early end thresholds (tunable): bigger eps = stop sooner (less precision required)
-      posEpsSq: 0.05 * 0.05, // camera position distance tolerance squared
-      targetEpsSq: 0.025 * 0.025, // target distance tolerance squared
+      duration: 0.9,
+      posEpsSq: 0.05 * 0.05,
+      targetEpsSq: 0.025 * 0.025,
       minProgressForEarlyEnd: 0.55,
     };
     setIsResetting(true);
   }, []);
+
+  // Focus camera on a given vase index (wrap-around) while preserving current distance & view direction
+  const focusVase = useCallback((index) => {
+    if (!controlsRef.current) return;
+    const cam = controlsRef.current.object;
+    const wrapped = ((index % VASE_COUNT) + VASE_COUNT) % VASE_COUNT;
+    if (wrapped === activeVaseIndex) return;
+    const newTarget = new THREE.Vector3(wrapped * VASE_SPACING, 0, 0);
+    // Preserve current offset vector (camera relative location) to keep orientation & distance stable
+    const offset = cam.position.clone().sub(controlsRef.current.target);
+    const toPos = newTarget.clone().add(offset);
+    // Update persistent defaults (direction & offset) for subsequent resets
+    defaultTarget.current.copy(newTarget);
+    defaultDir.current.copy(offset.clone().normalize());
+    defaultOffset.current.copy(offset);
+    resetRef.current = {
+      fromPos: cam.position.clone(),
+      toPos,
+      fromTarget: controlsRef.current.target.clone(),
+      toTarget: newTarget.clone(),
+      elapsed: 0,
+      duration: 0.7,
+      posEpsSq: 0.05 * 0.05,
+      targetEpsSq: 0.025 * 0.025,
+      minProgressForEarlyEnd: 0.5,
+    };
+    setActiveVaseIndex(wrapped);
+    setIsResetting(true);
+    setDraggingMode(null);
+  }, [activeVaseIndex]);
+
+  // Keyboard navigation between vases
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'ArrowRight') {
+        focusVase(activeVaseIndex + 1);
+      } else if (e.key === 'ArrowLeft') {
+        focusVase(activeVaseIndex - 1);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [focusVase, activeVaseIndex]);
 
   // Map active base layer into priority slots expected by hook (camera > upload > base)
   const baseParam = activeBaseLayer === 'base' ? textureSources.base : null;
@@ -250,7 +301,7 @@ export default function App() {
           fontFamily: "monospace",
         }}
       >
-        current zoom: {currentZoom.toFixed(2)} | mode: {draggingMode || "idle"}
+        current zoom: {currentZoom.toFixed(2)} | mode: {draggingMode || "idle"} | active vase: {activeVaseIndex}
         {isResetting ? " (resetting)" : ""}
       </div>
 
@@ -272,13 +323,29 @@ export default function App() {
         <ambientLight intensity={0.6} />
         <directionalLight position={[2, 4, 2]} intensity={1} />
         <Suspense fallback={null}>
-          <Bounds fit clip margin={BOUNDS_MARGIN}>
-            <VaseModel
-              texture={texture || defaultTexture}
-              rotateWithPointer={true}
-              onVasePointerDown={handleVasePointerDown}
-            />
-          </Bounds>
+          {/* Without <Bounds>, we manage camera focusing manually */}
+          {Array.from({ length: VASE_COUNT }).map((_, i) => {
+            const isActive = i === activeVaseIndex;
+            return (
+              <group
+                key={i}
+                position={[i * VASE_SPACING, 0, 0]}
+                {...(!isActive && {
+                  onPointerDown: (e) => e.stopPropagation(),
+                  onPointerMove: (e) => e.stopPropagation(),
+                  onPointerUp: (e) => e.stopPropagation(),
+                  onPointerCancel: (e) => e.stopPropagation(),
+                  onPointerOut: (e) => e.stopPropagation(),
+                })}
+              >
+                <VaseModel
+                  texture={texture || defaultTexture}
+                  rotateWithPointer={isActive}
+                  onVasePointerDown={isActive ? handleVasePointerDown : undefined}
+                />
+              </group>
+            );
+          })}
         </Suspense>
         <FloatingTitle3D title={title3D} color={baseColor} />
           <OrbitControls

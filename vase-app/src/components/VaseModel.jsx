@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useMemo } from "react";
 import { useFrame } from '@react-three/fiber';
 import * as THREE from "three";
 import { useGLTF } from "@react-three/drei";
@@ -73,15 +73,34 @@ export default function VaseModel({
   const pivotRef = useRef();
   const dragState = useRef({ dragging: false, lastX: 0, lastY: 0, angularVelocity: 0 });
 
-  // Apply the provided texture (if any) to all mesh materials.
+  // Clone the loaded scene so multiple VaseModel instances can coexist & have independent materials.
+  const instance = useMemo(() => {
+    if (!scene) return null;
+    const cloned = scene.clone(true);
+    // Ensure unique material instances for per-vase texture changes.
+    cloned.traverse((o) => {
+      if (o.isMesh) {
+        if (Array.isArray(o.material)) {
+          o.material = o.material.map(m => m && m.isMaterial ? m.clone() : m);
+        } else if (o.material && o.material.isMaterial) {
+          o.material = o.material.clone();
+        }
+        // Slight safety: disable frustum culling for complex centered object if needed
+        o.frustumCulled = false;
+      }
+    });
+    return cloned;
+  }, [scene]);
+
+  // Apply the provided texture (if any) to all mesh materials of the clone only.
   useEffect(() => {
-    if (!scene) return;
+    if (!instance) return;
     if (texture) {
       texture.colorSpace = THREE.SRGBColorSpace;
       texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
       texture.flipY = false;
     }
-    scene.traverse((obj) => {
+    instance.traverse((obj) => {
       if (obj.isMesh && obj.material && obj.material.isMaterial) {
         if (texture) {
           obj.material.map = texture;
@@ -89,15 +108,16 @@ export default function VaseModel({
         }
       }
     });
-  }, [scene, texture]);
+  }, [instance, texture]);
 
-  // Center vase for stable spin (horizontal center at 0, base at y=0)
-  useCenterForSpin(scene);
+  // Center vase for stable spin (horizontal center at 0, base at y=0) on the cloned instance.
+  useCenterForSpin(instance);
 
   // Pointer drag handlers (rotate around Y axis)
   const onPointerDown = (e) => {
     if (!rotateWithPointer) return;
-    e.stopPropagation();
+    // Only stop propagation if this vase should capture interaction
+    if (rotateWithPointer) e.stopPropagation();
     dragState.current.dragging = true;
     dragState.current.lastX = e.clientX;
     dragState.current.lastY = e.clientY;
@@ -108,7 +128,7 @@ export default function VaseModel({
 
   const onPointerMove = (e) => {
     if (!rotateWithPointer || !dragState.current.dragging || !pivotRef.current) return;
-    e.stopPropagation();
+    if (rotateWithPointer) e.stopPropagation();
     const dx = e.clientX - dragState.current.lastX;
     const deltaAngle = dx * 0.01; // sensitivity
     pivotRef.current.rotation.y += deltaAngle;
@@ -119,7 +139,7 @@ export default function VaseModel({
 
   const endDrag = (e) => {
     if (!rotateWithPointer) return;
-    e.stopPropagation();
+    if (rotateWithPointer) e.stopPropagation();
     dragState.current.dragging = false;
     // If movement was minimal, zero out inertia so it doesn't feel jumpy
     if (Math.abs(dragState.current.angularVelocity) < 0.0001) {
@@ -146,7 +166,8 @@ export default function VaseModel({
     <group
       ref={pivotRef}
       onPointerDown={(e) => {
-        e.stopPropagation();
+        // Stop propagation only if interactive (rotate) or explicit handler wants exclusive control
+        if (rotateWithPointer || onVasePointerDown) e.stopPropagation();
         onVasePointerDown?.();
         onPointerDown(e);
       }}
@@ -155,7 +176,7 @@ export default function VaseModel({
       onPointerOut={endDrag}
       onPointerCancel={endDrag}
     >
-      {scene && <primitive object={scene} />}
+      {instance && <primitive object={instance} />}
     </group>
   );
 }
