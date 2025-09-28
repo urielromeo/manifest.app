@@ -10,8 +10,9 @@ import useComposedTexture from './hooks/useComposedTexture.js';
 
 const BOUNDS_MARGIN = 2.15; // (kept for potential future use)
 // Multi-vase configuration
-const VASE_COUNT = 2; // Adjust this number to render more or fewer vases
-const VASE_SPACING = 25; // Fixed X distance between consecutive vases
+const VASE_COUNT = 9; // Adjust this number to render more or fewer vases
+const VASE_COLUMNS_COUNT = 3; // Number of columns before wrapping to a new row
+const VASE_SPACING = 20; // Horizontal (X) and vertical (Y) spacing between vases in the grid
 
 // Camera / focus tuning
 // Keep target at vase base (y=0), but raise the camera itself.
@@ -116,12 +117,23 @@ export default function App() {
   }, []);
 
   // Focus camera on a given vase index (wrap-around) while preserving current distance & view direction
+  // Helper to compute vase target position from index (grid layout)
+  const getVaseTarget = useCallback((idx) => {
+    const col = idx % VASE_COLUMNS_COUNT;
+    const row = Math.floor(idx / VASE_COLUMNS_COUNT);
+    // Arrange vases downward along -Y (screen vertical) instead of pushing back on Z.
+    // Target's Y should remain VASE_TARGET_Y units above the vase group's base Y.
+    const baseY = -row * VASE_SPACING; // group Y position
+    const targetY = baseY + VASE_TARGET_Y;
+    return new THREE.Vector3(col * VASE_SPACING, targetY, 0);
+  }, []);
+
   const focusVase = useCallback((index) => {
     if (!controlsRef.current) return;
     const cam = controlsRef.current.object;
     const wrapped = ((index % VASE_COUNT) + VASE_COUNT) % VASE_COUNT;
     if (wrapped === activeVaseIndex) return;
-  const newTarget = new THREE.Vector3(wrapped * VASE_SPACING, VASE_TARGET_Y, 0);
+    const newTarget = getVaseTarget(wrapped);
     // Preserve current offset vector (camera relative location) to keep orientation & distance stable
     const offset = cam.position.clone().sub(controlsRef.current.target);
     const toPos = newTarget.clone().add(offset);
@@ -143,7 +155,7 @@ export default function App() {
     setActiveVaseIndex(wrapped);
     setIsResetting(true);
     setDraggingMode(null);
-  }, [activeVaseIndex]);
+  }, [activeVaseIndex, getVaseTarget]);
 
   // Keyboard navigation between vases
   useEffect(() => {
@@ -356,10 +368,14 @@ export default function App() {
           {/* Without <Bounds>, we manage camera focusing manually */}
           {Array.from({ length: VASE_COUNT }).map((_, i) => {
             const isActive = i === activeVaseIndex;
+            const col = i % VASE_COLUMNS_COUNT;
+            const row = Math.floor(i / VASE_COLUMNS_COUNT);
+            const x = col * VASE_SPACING;
+            const y = -row * VASE_SPACING; // move downward instead of backward
             return (
               <group
                 key={i}
-                position={[i * VASE_SPACING, 0, 0]}
+                position={[x, y, 0]}
                 {...(!isActive && {
                   onPointerDown: (e) => e.stopPropagation(),
                   onPointerMove: (e) => e.stopPropagation(),
