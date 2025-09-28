@@ -1,24 +1,81 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-ssr/
+*.tsbuildinfo
+
+# Vite / cache
+.vite/
+.cache/
+
 # Logs
-logs
-*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+bun-debug.log*
 
-node_modules
-dist
-dist-ssr
-*.local
+# Environment files (keep example)
+.env
+.env.*
+!.env.example
 
-# Editor directories and files
+# Testing / coverage
+coverage/
+.vitest/
+.nyc_output/
+jest-cache/
+jest-resolver-cache/
+jest-transform-cache/
+
+# Package manager caches
+.pnpm-store/
+.pnp.cjs
+.pnp.loader.mjs
+.yarn/
+.yarnrc.yml
+.yarn-integrity
+
+# Lint / formatting caches
+.eslintcache
+.stylelintcache
+.prettiercache
+
+# Tooling
+turbo/
+
+# Editor / IDE
 .vscode/*
+!.vscode/settings.json
 !.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
+.idea/
 *.sw?
+*~
+*.orig
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Screenshots / generated media
+screenshots/
+captures/
+
+# Optional: raw exports or large temporary assets
+tmp/
+temp/
+
+# Keep 3D model assets tracked (explicit for clarity)
+!src/assets/models/*.glb
+
+# Fonts (tracked)
+!public/fonts/
+
+# Prevent ignoring lockfiles (keep them for reproducible builds)
+# (Uncomment to ignore if desired)
+# package-lock.json
+# pnpm-lock.yaml
+# yarn.lock
