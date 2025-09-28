@@ -65,7 +65,6 @@ export default function VaseModel({
   texture,
   rotateWithPointer = true,
   onVasePointerDown,
-  onVasePointerUp,
   inertialRotation = true, // enable simple momentum effect
   inertiaFriction = 0.92,  // per-frame decay factor (closer to 1 = longer spin)
   minInertiaSpeed = 0.0005 // cutoff to stop updating
@@ -102,8 +101,9 @@ export default function VaseModel({
     dragState.current.dragging = true;
     dragState.current.lastX = e.clientX;
     dragState.current.lastY = e.clientY;
-    // NOTE: We intentionally do NOT use pointer capture here because react-three-fiber
-    // event targets are 3D objects (not DOM nodes) causing DOMExceptions in some browsers.
+    if (e.target.setPointerCapture) {
+      try { e.target.setPointerCapture(e.pointerId); } catch {}
+    }
   };
 
   const onPointerMove = (e) => {
@@ -125,8 +125,9 @@ export default function VaseModel({
     if (Math.abs(dragState.current.angularVelocity) < 0.0001) {
       dragState.current.angularVelocity = 0;
     }
-    // No pointer capture to release (see note in onPointerDown).
-    onVasePointerUp?.(e);
+    if (e.target.releasePointerCapture) {
+      try { e.target.releasePointerCapture(e.pointerId); } catch {}
+    }
   };
 
   // Simple per-frame inertia decay
@@ -150,9 +151,9 @@ export default function VaseModel({
         onPointerDown(e);
       }}
       onPointerMove={onPointerMove}
-  onPointerUp={endDrag}
-  onPointerOut={endDrag}
-  onPointerCancel={endDrag}
+      onPointerUp={endDrag}
+      onPointerOut={endDrag}
+      onPointerCancel={endDrag}
     >
       {scene && <primitive object={scene} />}
     </group>
