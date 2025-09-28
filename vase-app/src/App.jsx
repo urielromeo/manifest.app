@@ -13,6 +13,14 @@ const BOUNDS_MARGIN = 2.15; // (kept for potential future use)
 const VASE_COUNT = 2; // Adjust this number to render more or fewer vases
 const VASE_SPACING = 25; // Fixed X distance between consecutive vases
 
+// Camera / focus tuning
+// Keep target at vase base (y=0), but raise the camera itself.
+const VASE_TARGET_Y = 4; // look-at stays here
+const INITIAL_CAMERA_DISTANCE = 28; // desired radial distance (reported as zoom)
+const CAMERA_HEIGHT = 7; // how high above target the camera sits
+// Compute Z so that sqrt(CAMERA_HEIGHT^2 + z^2) === INITIAL_CAMERA_DISTANCE, preserving displayed zoom value.
+const INITIAL_CAMERA_Z = Math.max(0, Math.sqrt(Math.max(0, INITIAL_CAMERA_DISTANCE * INITIAL_CAMERA_DISTANCE - CAMERA_HEIGHT * CAMERA_HEIGHT)));
+
 // --- Helper component for camera reset animation ---
 const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3); // hoisted to avoid re-allocation each frame
 function CameraResetAnimator({ controlsRef, resetRef, onDone }) {
@@ -61,7 +69,7 @@ export default function App() {
     () => Array.from({ length: VASE_COUNT }, () => '')
   );
   const [activeAction, setActiveAction] = useState(null);
-  const [currentZoom, setCurrentZoom] = useState(1);
+  const [currentZoom, setCurrentZoom] = useState(INITIAL_CAMERA_DISTANCE);
   const [activeVaseIndex, setActiveVaseIndex] = useState(0); // which vase camera is focused on
   // Mobile layout adjustment
   const bottomBarRef = useRef(null);
@@ -74,8 +82,9 @@ export default function App() {
   const controlsRef = useRef(null);
 
   // Defaults & reset helpers
-  const defaultCamPos = useRef(new THREE.Vector3(0, 1, 6));
-  const defaultTarget = useRef(new THREE.Vector3(0, 0, 0));
+  // Set initial camera so its radial distance to target is INITIAL_CAMERA_DISTANCE while being raised by CAMERA_HEIGHT.
+  const defaultTarget = useRef(new THREE.Vector3(0, VASE_TARGET_Y, 0));
+  const defaultCamPos = useRef(new THREE.Vector3(0, CAMERA_HEIGHT, INITIAL_CAMERA_Z));
   const defaultDir = useRef(
     defaultCamPos.current.clone().sub(defaultTarget.current).normalize()
   );
@@ -112,7 +121,7 @@ export default function App() {
     const cam = controlsRef.current.object;
     const wrapped = ((index % VASE_COUNT) + VASE_COUNT) % VASE_COUNT;
     if (wrapped === activeVaseIndex) return;
-    const newTarget = new THREE.Vector3(wrapped * VASE_SPACING, 0, 0);
+  const newTarget = new THREE.Vector3(wrapped * VASE_SPACING, VASE_TARGET_Y, 0);
     // Preserve current offset vector (camera relative location) to keep orientation & distance stable
     const offset = cam.position.clone().sub(controlsRef.current.target);
     const toPos = newTarget.clone().add(offset);
@@ -338,7 +347,7 @@ export default function App() {
         }}
       >
         <Canvas
-          camera={{ position: [0, 1, 6], fov: 50 }}
+          camera={{ position: [0, CAMERA_HEIGHT, INITIAL_CAMERA_Z], fov: 50 }}
           onPointerDown={handleCanvasPointerDown}
         >
         <ambientLight intensity={0.6} />
@@ -368,7 +377,6 @@ export default function App() {
                   <FloatingTitle3D
                     title={titles3D[i]}
                     color={baseColors[i]}
-                    position={[0, -8, 0]}
                   />
                 )}
               </group>
@@ -385,8 +393,9 @@ export default function App() {
             enablePan
             enableZoom={true}
             minDistance={3}
-            maxDistance={75}
+            maxDistance={28}
             onChange={handleControlsChange}
+            target={[defaultTarget.current.x, defaultTarget.current.y, defaultTarget.current.z]}
           />
 
           <CameraResetAnimator

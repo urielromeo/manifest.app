@@ -45,11 +45,11 @@ function useCenterForSpin(object3D) {
     // Shift only horizontal center
     object3D.position.x -= center.x;
     object3D.position.z -= center.z;
-
+    
     // Recompute after X/Z shift to find new minY, then lift base to y=0
     const shiftedBox = new THREE.Box3().setFromObject(object3D);
     const baseOffset = shiftedBox.min.y; // if negative, raise; if positive, lower
-    object3D.position.y -= baseOffset;
+  object3D.position.y -= baseOffset;
 
     centeredRef.current = true;
   }, [object3D]);
