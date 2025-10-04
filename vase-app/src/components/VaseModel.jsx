@@ -2,13 +2,16 @@ import React, { useEffect, useRef, useMemo } from "react";
 import { useFrame } from '@react-three/fiber';
 import * as THREE from "three";
 import { useGLTF } from "@react-three/drei";
-import modelUrl from "../assets/models/vases-manifest-app.glb"; // relative to components/
+import modelUrl from "../assets/models/vase-1-main.glb"; // relative to components/
+import shardsModelUrl from "../assets/models/vase-1-shards.glb"; // relative to components/
+
 
 // Exported so other modules could optionally preload if desired
 export const MODEL_URL = modelUrl;
 
 // Preload once at module evaluation time (safe: no hooks here)
 useGLTF.preload(MODEL_URL);
+useGLTF.preload(shardsModelUrl);
 
 /**
  * Hook: center the model for clean Y-axis rotation.
@@ -67,16 +70,25 @@ export default function VaseModel({
   onVasePointerDown,
   inertialRotation = true, // enable simple momentum effect
   inertiaFriction = 0.92,  // per-frame decay factor (closer to 1 = longer spin)
-  minInertiaSpeed = 0.0005 // cutoff to stop updating
+  minInertiaSpeed = 0.0005, // cutoff to stop updating
+  // Destroy/shatter controls
+  shattered = false,
+  shatterTriggerId = 0,
+  onShatterComplete,
 }) {
-  const { scene } = useGLTF(MODEL_URL);
+  const { scene: mainScene } = useGLTF(MODEL_URL);
+  const { scene: shardsScene } = useGLTF(shardsModelUrl);
   const pivotRef = useRef();
   const dragState = useRef({ dragging: false, lastX: 0, lastY: 0, angularVelocity: 0 });
+  const shardsVelRef = useRef(new Map()); // Map<Mesh, { v: Vector3, av: Vector3 }>
+  const shardsActiveRef = useRef(false);
+  const shatterTimeoutRef = useRef(null);
+  const shardsInitialRef = useRef(new Map()); // Map<Mesh, { p: Vector3, q: Quaternion, s: Vector3 }>
 
   // Clone the loaded scene so multiple VaseModel instances can coexist & have independent materials.
-  const instance = useMemo(() => {
-    if (!scene) return null;
-    const cloned = scene.clone(true);
+  const mainInstance = useMemo(() => {
+    if (!mainScene) return null;
+    const cloned = mainScene.clone(true);
     // Ensure unique material instances for per-vase texture changes.
     cloned.traverse((o) => {
       if (o.isMesh) {
@@ -90,28 +102,121 @@ export default function VaseModel({
       }
     });
     return cloned;
-  }, [scene]);
+  }, [mainScene]);
+
+  const shardsInstance = useMemo(() => {
+    if (!shardsScene) return null;
+    const cloned = shardsScene.clone(true);
+    cloned.traverse((o) => {
+      if (o.isMesh) {
+        if (Array.isArray(o.material)) {
+          o.material = o.material.map(m => m && m.isMaterial ? m.clone() : m);
+        } else if (o.material && o.material.isMaterial) {
+          o.material = o.material.clone();
+        }
+        o.frustumCulled = false;
+      }
+    });
+    return cloned;
+  }, [shardsScene]);
+
+  // Capture initial local transforms for shards once after creation
+  useEffect(() => {
+    if (!shardsInstance) return;
+    shardsInitialRef.current.clear();
+    shardsInstance.traverse((o) => {
+      if (o.isMesh) {
+        shardsInitialRef.current.set(o, {
+          p: o.position.clone(),
+          q: o.quaternion.clone(),
+          s: o.scale.clone(),
+        });
+      }
+    });
+  }, [shardsInstance]);
 
   // Apply the provided texture (if any) to all mesh materials of the clone only.
   useEffect(() => {
-    if (!instance) return;
+    if (!mainInstance && !shardsInstance) return;
     if (texture) {
       texture.colorSpace = THREE.SRGBColorSpace;
       texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
       texture.flipY = false;
     }
-    instance.traverse((obj) => {
-      if (obj.isMesh && obj.material && obj.material.isMaterial) {
-        if (texture) {
-          obj.material.map = texture;
-          obj.material.needsUpdate = true;
+    const applyTex = (root) => {
+      if (!root) return;
+      root.traverse((obj) => {
+        if (obj.isMesh && obj.material && obj.material.isMaterial) {
+          if (texture) {
+            obj.material.map = texture;
+            obj.material.needsUpdate = true;
+          }
         }
-      }
-    });
-  }, [instance, texture]);
+      });
+    };
+    applyTex(mainInstance);
+    applyTex(shardsInstance);
+  }, [mainInstance, shardsInstance, texture]);
 
   // Center vase for stable spin (horizontal center at 0, base at y=0) on the cloned instance.
-  useCenterForSpin(instance);
+  useCenterForSpin(mainInstance);
+  useCenterForSpin(shardsInstance);
+
+  // Initialize shard explosion when shattered toggles with a new trigger id
+  useEffect(() => {
+    if (!shattered || !shardsInstance) return;
+    // Clear any previous timer
+    if (shatterTimeoutRef.current) {
+      clearTimeout(shatterTimeoutRef.current);
+      shatterTimeoutRef.current = null;
+    }
+    // Restore initial transforms so repeated shatters start from intact shards arrangement
+    shardsInitialRef.current.forEach((t, mesh) => {
+      if (!mesh) return;
+      mesh.position.copy(t.p);
+      mesh.quaternion.copy(t.q);
+      mesh.scale.copy(t.s);
+    });
+    // Build a list of mesh children
+    const meshes = [];
+    shardsInstance.traverse((o) => { if (o.isMesh) meshes.push(o); });
+    // Compute approximate center in world space
+    const bbox = new THREE.Box3().setFromObject(shardsInstance);
+    const centerWorld = bbox.getCenter(new THREE.Vector3());
+    const tmpWorld = new THREE.Vector3();
+    const rng = (min, max) => Math.random() * (max - min) + min;
+    shardsVelRef.current.clear();
+    meshes.forEach((m) => {
+      m.updateWorldMatrix(true, false);
+      m.getWorldPosition(tmpWorld);
+      const dir = tmpWorld.clone().sub(centerWorld).normalize();
+      // If degenerate, randomize direction a bit
+      if (!isFinite(dir.x) || !isFinite(dir.y) || !isFinite(dir.z) || dir.lengthSq() < 1e-6) {
+        dir.set(rng(-1, 1), rng(0, 1), rng(-1, 1)).normalize();
+      }
+      const speed = rng(3.5, 8.0); // outward burst
+      const v = dir.multiplyScalar(speed);
+      // give some upward kick
+      v.y += rng(2.0, 6.0);
+      const av = new THREE.Vector3(rng(-3, 3), rng(-5, 5), rng(-3, 3)); // angular velocity (rad/s)
+      shardsVelRef.current.set(m, { v, av });
+    });
+    shardsActiveRef.current = true;
+
+    // Set 5s timeout to finish
+    shatterTimeoutRef.current = setTimeout(() => {
+      shardsActiveRef.current = false;
+      onShatterComplete && onShatterComplete();
+    }, 5000);
+
+    return () => {
+      if (shatterTimeoutRef.current) {
+        clearTimeout(shatterTimeoutRef.current);
+        shatterTimeoutRef.current = null;
+      }
+      shardsActiveRef.current = false;
+    };
+  }, [shattered, shatterTriggerId, shardsInstance, onShatterComplete]);
 
   // Pointer drag handlers (rotate around Y axis)
   const onPointerDown = (e) => {
@@ -151,15 +256,38 @@ export default function VaseModel({
   };
 
   // Simple per-frame inertia decay
-  useFrame(() => {
-    if (!inertialRotation || dragState.current.dragging || !pivotRef.current) return;
-    let v = dragState.current.angularVelocity;
-    if (Math.abs(v) < minInertiaSpeed) {
-      dragState.current.angularVelocity = 0;
-      return;
+  useFrame((_, delta) => {
+    // Inertia for intact vase
+    if (!shattered) {
+      if (!inertialRotation || dragState.current.dragging || !pivotRef.current) return;
+      let v = dragState.current.angularVelocity;
+      if (Math.abs(v) < minInertiaSpeed) {
+        dragState.current.angularVelocity = 0;
+        return;
+      }
+      pivotRef.current.rotation.y += v;
+      dragState.current.angularVelocity *= inertiaFriction;
+    } else {
+      // Simple shard physics while shattered
+      if (!shardsActiveRef.current || !shardsInstance) return;
+      const g = 9.8; // gravity m/s^2
+      const linDamp = 0.98; // linear damping per frame
+      const angDamp = 0.985; // angular damping per frame
+      shardsVelRef.current.forEach((state, mesh) => {
+        // integrate
+        state.v.y -= g * delta;
+        mesh.position.x += state.v.x * delta;
+        mesh.position.y += state.v.y * delta;
+        mesh.position.z += state.v.z * delta;
+        // spin
+        mesh.rotation.x += state.av.x * delta;
+        mesh.rotation.y += state.av.y * delta;
+        mesh.rotation.z += state.av.z * delta;
+        // dampening
+        state.v.multiplyScalar(linDamp);
+        state.av.multiplyScalar(angDamp);
+      });
     }
-    pivotRef.current.rotation.y += v;
-    dragState.current.angularVelocity *= inertiaFriction;
   });
 
   return (
@@ -176,7 +304,8 @@ export default function VaseModel({
       onPointerOut={endDrag}
       onPointerCancel={endDrag}
     >
-      {instance && <primitive object={instance} />}
+      {!shattered && mainInstance && <primitive object={mainInstance} />}
+      {shattered && shardsInstance && <primitive object={shardsInstance} />}
     </group>
   );
 }

@@ -4,12 +4,14 @@ import React from "react";
 //  - activeAction: 'manifest' | 'destroy' | null
 //  - setActiveAction(action) : to set the active action
 
-export default function ActionsPanel({ activeAction, setActiveAction }) {
+export default function ActionsPanel({ activeAction, setActiveAction, disabled = false }) {
   const handleManifest = () => {
+    if (disabled) return;
     setActiveAction(activeAction === 'manifest' ? null : 'manifest');
   };
 
   const handleDestroy = () => {
+    if (disabled) return;
     setActiveAction(activeAction === 'destroy' ? null : 'destroy');
   };
 
@@ -23,11 +25,13 @@ export default function ActionsPanel({ activeAction, setActiveAction }) {
             padding: "6px 12px", 
             borderRadius: 4, 
             border: "none", 
-            cursor: "pointer",
+            cursor: disabled ? "not-allowed" : "pointer",
             backgroundColor: activeAction === 'manifest' ? "#4CAF50" : "#f0f0f0",
             color: activeAction === 'manifest' ? "white" : "black",
-            fontWeight: activeAction === 'manifest' ? "bold" : "normal"
+            fontWeight: activeAction === 'manifest' ? "bold" : "normal",
+            opacity: disabled ? 0.6 : 1,
           }}
+          disabled={disabled}
         >
           MANIFEST
         </button>
@@ -37,11 +41,13 @@ export default function ActionsPanel({ activeAction, setActiveAction }) {
             padding: "6px 12px", 
             borderRadius: 4, 
             border: "none", 
-            cursor: "pointer",
+            cursor: disabled ? "not-allowed" : "pointer",
             backgroundColor: activeAction === 'destroy' ? "#f44336" : "#f0f0f0",
             color: activeAction === 'destroy' ? "white" : "black",
-            fontWeight: activeAction === 'destroy' ? "bold" : "normal"
+            fontWeight: activeAction === 'destroy' ? "bold" : "normal",
+            opacity: disabled ? 0.6 : 1,
           }}
+          disabled={disabled}
         >
           DESTROY
         </button>

@@ -23,6 +23,7 @@ const Sidebars = React.forwardRef(function Sidebars({
   setTitle3DForVase,
   activeAction,
   setActiveAction,
+  disabled = false,
 }, bottomBarRef) {
   const commonPanels = (
     <>
@@ -48,6 +49,7 @@ const Sidebars = React.forwardRef(function Sidebars({
       <ActionsPanel
         activeAction={activeAction}
         setActiveAction={setActiveAction}
+        disabled={disabled}
       />
       <DebugPanel rotateVase={true} setRotateVase={() => {}} />
     </>
@@ -67,6 +69,8 @@ const Sidebars = React.forwardRef(function Sidebars({
           width: 280,
           height: "100%",
           overflowY: "auto",
+          opacity: disabled ? 0.5 : 1,
+          filter: disabled ? 'grayscale(25%)' : 'none',
         }}
         className="desktop-sidebar"
       >
@@ -88,6 +92,8 @@ const Sidebars = React.forwardRef(function Sidebars({
           backgroundColor: "rgba(0,0,0,0.8)",
           maxHeight: "25svh",
           overflowY: "auto",
+          opacity: disabled ? 0.5 : 1,
+          filter: disabled ? 'grayscale(25%)' : 'none',
         }}
         className="mobile-bottom-bar"
       >
