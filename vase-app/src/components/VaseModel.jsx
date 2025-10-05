@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useMemo } from "react";
 import { useFrame } from '@react-three/fiber';
 import * as THREE from "three";
 import { useGLTF } from "@react-three/drei";
-import modelUrl from "../assets/models/vase-1-main.glb"; // relative to components/
+import modelUrl from "../assets/models/vase-2-main.glb"; // relative to components/
 import shardsModelUrl from "../assets/models/vase-1-shards.glb"; // relative to components/
 
 
@@ -52,7 +52,7 @@ function useCenterForSpin(object3D) {
     // Recompute after X/Z shift to find new minY, then lift base to y=0
     const shiftedBox = new THREE.Box3().setFromObject(object3D);
     const baseOffset = shiftedBox.min.y; // if negative, raise; if positive, lower
-  object3D.position.y -= baseOffset;
+    object3D.position.y -= baseOffset;
 
     centeredRef.current = true;
   }, [object3D]);
@@ -75,6 +75,7 @@ export default function VaseModel({
   shattered = false,
   shatterTriggerId = 0,
   onShatterComplete,
+  children,
 }) {
   const { scene: mainScene } = useGLTF(MODEL_URL);
   const { scene: shardsScene } = useGLTF(shardsModelUrl);
@@ -84,6 +85,10 @@ export default function VaseModel({
   const shardsActiveRef = useRef(false);
   const shatterTimeoutRef = useRef(null);
   const shardsInitialRef = useRef(new Map()); // Map<Mesh, { p: Vector3, q: Quaternion, s: Vector3 }>
+  const shardsElapsedRef = useRef(0);   // seconds since current shatter started
+  const shardsStartRef = useRef(0);     // performance.now() at shatter start (ms)
+  // Track last processed trigger to avoid Strict Mode double-effect re-initialization
+  const lastProcessedTriggerRef = useRef(null);
 
   // Clone the loaded scene so multiple VaseModel instances can coexist & have independent materials.
   const mainInstance = useMemo(() => {
@@ -162,14 +167,18 @@ export default function VaseModel({
   useCenterForSpin(mainInstance);
   useCenterForSpin(shardsInstance);
 
-  // Initialize shard explosion when shattered toggles with a new trigger id
+  // Initialize shard explosion exactly once per trigger id (Strict Mode safe)
   useEffect(() => {
     if (!shattered || !shardsInstance) return;
-    // Clear any previous timer
+    if (lastProcessedTriggerRef.current === shatterTriggerId) { return; };
+    lastProcessedTriggerRef.current = shatterTriggerId;
+
+    // Clear any previous timer before starting a new run
     if (shatterTimeoutRef.current) {
       clearTimeout(shatterTimeoutRef.current);
       shatterTimeoutRef.current = null;
     }
+
     // Restore initial transforms so repeated shatters start from intact shards arrangement
     shardsInitialRef.current.forEach((t, mesh) => {
       if (!mesh) return;
@@ -177,30 +186,49 @@ export default function VaseModel({
       mesh.quaternion.copy(t.q);
       mesh.scale.copy(t.s);
     });
+
     // Build a list of mesh children
     const meshes = [];
     shardsInstance.traverse((o) => { if (o.isMesh) meshes.push(o); });
-    // Compute approximate center in world space
+
+    // Compute approximate center in world space once
     const bbox = new THREE.Box3().setFromObject(shardsInstance);
     const centerWorld = bbox.getCenter(new THREE.Vector3());
     const tmpWorld = new THREE.Vector3();
     const rng = (min, max) => Math.random() * (max - min) + min;
+
     shardsVelRef.current.clear();
+    shardsElapsedRef.current = 0;
+    shardsStartRef.current = performance.now();
+
+    // Tunables for "explosion" feel
+    const baseStrength = 5.0;   // overall impulse magnitude
+    const randJitter   = 1.0;    // random variation added to base strength
+    const upBias       = 0.55;   // extra upward kick as a fraction of strength
+
     meshes.forEach((m) => {
       m.updateWorldMatrix(true, false);
       m.getWorldPosition(tmpWorld);
-      const dir = tmpWorld.clone().sub(centerWorld).normalize();
-      // If degenerate, randomize direction a bit
-      if (!isFinite(dir.x) || !isFinite(dir.y) || !isFinite(dir.z) || dir.lengthSq() < 1e-6) {
-        dir.set(rng(-1, 1), rng(0, 1), rng(-1, 1)).normalize();
+      // Direction from epicenter to shard
+      const dir = tmpWorld.clone().sub(centerWorld);
+      const dist = dir.length();
+      if (dist < 1e-5) {
+        // Avoid degenerate vectors; randomize slightly
+        dir.set(rng(-1, 1), rng(0, 1), rng(-1, 1));
       }
-      const speed = rng(3.5, 8.0); // outward burst
-      const v = dir.multiplyScalar(speed);
-      // give some upward kick
-      v.y += rng(2.0, 6.0);
-      const av = new THREE.Vector3(rng(-3, 3), rng(-5, 5), rng(-3, 3)); // angular velocity (rad/s)
+      dir.normalize();
+
+      // Make farther shards get a little more kick (subtle so it feels radial)
+      const distBoost = 1 + Math.min(dist * 0.15, 0.5); // up to +50%
+      const strength = (baseStrength + rng(0, randJitter)) * distBoost;
+
+      const v = dir.multiplyScalar(strength);
+      v.y += strength * upBias; // upward bias
+
+      const av = new THREE.Vector3(rng(-6, 6), rng(-10, 10), rng(-6, 6));
       shardsVelRef.current.set(m, { v, av });
     });
+
     shardsActiveRef.current = true;
 
     // Set 5s timeout to finish
@@ -208,15 +236,30 @@ export default function VaseModel({
       shardsActiveRef.current = false;
       onShatterComplete && onShatterComplete();
     }, 5000);
+  }, [shattered, shatterTriggerId, shardsInstance, onShatterComplete]);
 
-    return () => {
+  // Teardown when leaving shattered state or on unmount
+  useEffect(() => {
+    if (!shattered) {
       if (shatterTimeoutRef.current) {
         clearTimeout(shatterTimeoutRef.current);
         shatterTimeoutRef.current = null;
       }
       shardsActiveRef.current = false;
+      shardsElapsedRef.current = 0;
+      shardsStartRef.current = 0;
+    }
+    return () => {
+      // On unmount, ensure timers are cleared
+      if (shatterTimeoutRef.current) {
+        clearTimeout(shatterTimeoutRef.current);
+        shatterTimeoutRef.current = null;
+      }
+      shardsActiveRef.current = false;
+      shardsElapsedRef.current = 0;
+      shardsStartRef.current = 0;
     };
-  }, [shattered, shatterTriggerId, shardsInstance, onShatterComplete]);
+  }, [shattered]);
 
   // Pointer drag handlers (rotate around Y axis)
   const onPointerDown = (e) => {
@@ -270,12 +313,23 @@ export default function VaseModel({
     } else {
       // Simple shard physics while shattered
       if (!shardsActiveRef.current || !shardsInstance) return;
-      const g = 9.8; // gravity m/s^2
-      const linDamp = 0.98; // linear damping per frame
-      const angDamp = 0.985; // angular damping per frame
+
+      // Advance elapsed time
+      shardsElapsedRef.current += delta;
+
+      // Tunables
+      const g = 3.8;           // gravity m/s^2
+      const blastNoDampFor = 0.08; // seconds with no damping (impulsive feel)
+      const gravityDelay  = 0.1;  // seconds before gravity starts
+      const linDamp = 0.985;   // linear damping per frame after blast
+      const angDamp = 0.09;    // angular damping per frame after blast
+
+      const applyGravity = shardsElapsedRef.current > gravityDelay;
+      const applyDamping = shardsElapsedRef.current > blastNoDampFor;
+
       shardsVelRef.current.forEach((state, mesh) => {
         // integrate
-        state.v.y -= g * delta;
+        if (applyGravity) state.v.y -= g * delta;
         mesh.position.x += state.v.x * delta;
         mesh.position.y += state.v.y * delta;
         mesh.position.z += state.v.z * delta;
@@ -283,9 +337,11 @@ export default function VaseModel({
         mesh.rotation.x += state.av.x * delta;
         mesh.rotation.y += state.av.y * delta;
         mesh.rotation.z += state.av.z * delta;
-        // dampening
-        state.v.multiplyScalar(linDamp);
-        state.av.multiplyScalar(angDamp);
+        // dampening (after initial blast window)
+        if (applyDamping) {
+          state.v.multiplyScalar(linDamp);
+          state.av.multiplyScalar(angDamp);
+        }
       });
     }
   });
@@ -306,6 +362,7 @@ export default function VaseModel({
     >
       {!shattered && mainInstance && <primitive object={mainInstance} />}
       {shattered && shardsInstance && <primitive object={shardsInstance} />}
+      {children}
     </group>
   );
 }

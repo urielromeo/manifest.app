@@ -1,14 +1,21 @@
-import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react";
+import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback, useContext } from "react";
 import "./App.css";
 import * as THREE from "three";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, useGLTF } from "@react-three/drei";
+import { Physics, RigidBody, CuboidCollider } from '@react-three/rapier';
 import VaseModel, { MODEL_URL } from "./components/VaseModel.jsx";
 import FloatingTitle3D from "./components/FloatingTitle3D.jsx";
 import Sidebars from './components/Sidebars.jsx';
 import useComposedTexture from './hooks/useComposedTexture.js';
+import Coin from './components/Coin.jsx';
+import Test1Page from './components/Test1.jsx';
+
+export const VaseShatterContext = React.createContext({ phase: 'idle', center: [0,0,0], trigger: 0 });
 
 const BOUNDS_MARGIN = 2.15; // (kept for potential future use)
+
+
 // Multi-vase configuration
 const VASE_COUNT = 9; // Adjust this number to render more or fewer vases
 const VASE_COLUMNS_COUNT = 3; // Number of columns before wrapping to a new row
@@ -56,6 +63,8 @@ function CameraResetAnimator({ controlsRef, resetRef, onDone }) {
 }
 
 export default function App() {
+  const isTest1 = typeof window !== 'undefined' && window.location.pathname === '/test-1';
+  if (isTest1) return <Test1Page />;
   // Per-vase texture source stacks & metadata
   const [textureSourcesList, setTextureSourcesList] = useState(
     () => Array.from({ length: VASE_COUNT }, () => ({ base: null, upload: null, camera: null, text: null }))
@@ -72,6 +81,38 @@ export default function App() {
   const [activeAction, setActiveAction] = useState(null);
   const [currentZoom, setCurrentZoom] = useState(INITIAL_CAMERA_DISTANCE);
   const [activeVaseIndex, setActiveVaseIndex] = useState(0); // which vase camera is focused on
+  // Destroy/shatter orchestration
+  const [isLocked, setIsLocked] = useState(false); // lock UI and camera during destroy window
+  const [destroyingIndex, setDestroyingIndex] = useState(null);
+  const [destroyEventId, setDestroyEventId] = useState(0);
+  // Per-vase temporary sensor window so shards can escape but coins still collide after
+  const [vaseSensorWindows, setVaseSensorWindows] = useState(() => Array.from({ length: VASE_COUNT }, () => false));
+  const sensorTimersRef = useRef({});
+  // Track per-vase destroy in-progress to prevent duplicate triggers (e.g., React StrictMode double effects)
+  const destroyingVasesRef = useRef(new Set());
+  // Coins per vase (simple: each coin has id, position [x,y,z], rotation [x,y,z])
+  const [coinsByVase, setCoinsByVase] = useState(() => Array.from({ length: VASE_COUNT }, () => []));
+  // Simple per-vase coin spawner (like Test1)
+  const spawnCoinForVase = useCallback((vaseIndex) => {
+    setCoinsByVase(prev => {
+      const list = prev.map(arr => arr.slice());
+      const id = Date.now() + Math.random();
+      const position = [
+        (Math.random() - 0.5) * 0.6,
+        15,
+        (Math.random() - 0.5) * 0.6,
+      ];
+      const rotation = [
+        Math.random() * Math.PI,
+        Math.random() * Math.PI,
+        Math.random() * Math.PI,
+      ];
+      list[vaseIndex].push({ id, position, rotation });
+      return list;
+    });
+  }, []);
+  // Debug: toggle Rapier collider wireframes
+  const [debugPhysics, setDebugPhysics] = useState(false);
   // Mobile layout adjustment
   const bottomBarRef = useRef(null);
   const [bottomBarHeight, setBottomBarHeight] = useState(0);
@@ -157,18 +198,21 @@ export default function App() {
     setDraggingMode(null);
   }, [activeVaseIndex, getVaseTarget]);
 
-  // Keyboard navigation between vases
+  // Keyboard navigation between vases and simple coin spawn on Space
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === 'ArrowRight') {
         focusVase(activeVaseIndex + 1);
       } else if (e.key === 'ArrowLeft') {
         focusVase(activeVaseIndex - 1);
+      } else if (e.code === 'Space' && !e.repeat) {
+        e.preventDefault();
+        if (!isLocked) spawnCoinForVase(activeVaseIndex);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [focusVase, activeVaseIndex]);
+  }, [focusVase, activeVaseIndex, isLocked, spawnCoinForVase]);
 
   // Helpers to update per-vase structures
   const setTextureSourcesForVase = useCallback((index, updater) => {
@@ -236,6 +280,49 @@ export default function App() {
     console.info("[App] Using MODEL_URL:", MODEL_URL);
   }, []);
 
+  // Trigger manifest: spawn a coin above the active vase
+  
+
+  // Trigger manifest via sidebar action: spawn one coin above the active vase
+  useEffect(() => {
+    if (activeAction !== 'manifest') return;
+    if (!isLocked) spawnCoinForVase(activeVaseIndex);
+    setActiveAction(null);
+  }, [activeAction, activeVaseIndex, isLocked, spawnCoinForVase]);
+
+  // Trigger destroy when action becomes 'destroy' and we're not already locked
+  useEffect(() => {
+    if (activeAction !== 'destroy') return;
+    // Only allow when not locked
+    if (isLocked || destroyingIndex !== null) {
+      setActiveAction(null);
+      return;
+    }
+    // Prevent re-entry for the same vase even if this effect runs more than once
+    const idx = activeVaseIndex;
+    if (destroyingVasesRef.current.has(idx)) {
+      setActiveAction(null);
+      return;
+    }
+    destroyingVasesRef.current.add(idx);
+    // Start destroy on current active vase
+    setIsLocked(true);
+    setDestroyingIndex(idx);
+    setDestroyEventId((id) => id + 1);
+    // Open a short sensor window on this vase so shards/coins can blow outward, then restore solid walls
+    setVaseSensorWindows(prev => prev.map((v, i) => i === idx ? true : v));
+    // Clear any previous timer for this vase index
+    if (sensorTimersRef.current[idx]) {
+      clearTimeout(sensorTimersRef.current[idx]);
+    }
+    sensorTimersRef.current[idx] = setTimeout(() => {
+      setVaseSensorWindows(prev => prev.map((v, i) => i === idx ? false : v));
+      delete sensorTimersRef.current[idx];
+    }, 800); // ~0.8s window
+    // Clear the action button selection immediately
+    setActiveAction(null);
+  }, [activeAction, isLocked, destroyingIndex, activeVaseIndex]);
+
   // Measure mobile bottom bar to keep vase centered in visible area (not hidden behind overlay)
   useEffect(() => {
     const update = () => {
@@ -261,12 +348,14 @@ export default function App() {
   // Pointer logic
   const handleCanvasPointerDown = useCallback(() => {
     // If we're not currently dragging the vase and not resetting, enter camera mode
+    if (isLocked) return;
     if (draggingMode === null && !isResetting) setDraggingMode("camera");
-  }, [draggingMode, isResetting]);
+  }, [draggingMode, isResetting, isLocked]);
 
   // Global pointerup to finalize drags
   useEffect(() => {
     const up = () => {
+      if (isLocked) return;
       if (draggingMode === "camera") {
         // Start reset back to default orientation (keep distance)
         startCameraReset();
@@ -276,17 +365,18 @@ export default function App() {
     };
     window.addEventListener("pointerup", up);
     return () => window.removeEventListener("pointerup", up);
-  }, [draggingMode, startCameraReset]);
+  }, [draggingMode, startCameraReset, isLocked]);
 
   const handleVasePointerDown = useCallback((e) => {
     if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
-    if (isResetting) return;
+    if (isResetting || isLocked) return;
     setDraggingMode("vase");
-  }, [isResetting]);
+  }, [isResetting, isLocked]);
 
   // Extra safety: if pointer gets canceled or window/tab loses focus, gracefully end drag
   useEffect(() => {
     const cancel = () => {
+      if (isLocked) return;
       if (draggingMode === "camera") {
         startCameraReset();
       } else if (draggingMode === "vase") {
@@ -302,17 +392,43 @@ export default function App() {
       window.removeEventListener('blur', cancel);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [draggingMode, startCameraReset]);
+  }, [draggingMode, startCameraReset, isLocked]);
 
   // Keep OrbitControls mounted & active so first pointer move rotates immediately.
   // We dynamically enable/disable rotate & pan based on draggingMode to avoid
   // missing the initial pointerdown event when we previously relied on props.
   useEffect(() => {
     if (!controlsRef.current) return;
-    const allowCamera = draggingMode !== "vase" && !isResetting;
+    const allowCamera = draggingMode !== "vase" && !isResetting && !isLocked;
     controlsRef.current.enableRotate = allowCamera;
     controlsRef.current.enablePan = allowCamera;
-  }, [draggingMode, isResetting]);
+    controlsRef.current.enableZoom = allowCamera;
+  }, [draggingMode, isResetting, isLocked]);
+
+  // Prevent keyboard vase switching when locked
+  useEffect(() => {
+    const onKey = (e) => {
+      if (!isLocked) return;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [isLocked]);
+
+  // Debug key: press "d" to toggle collider wireframes
+  // Disabled global "d" toggle to avoid accidental debug enablement.
+  // useEffect(() => {
+  //   const onKey = (e) => {
+  //     if (e.key.toLowerCase() === 'd' && !e.repeat) {
+  //       setDebugPhysics((v) => !v);
+  //     }
+  //   };
+  //   window.addEventListener('keydown', onKey);
+  //   return () => window.removeEventListener('keydown', onKey);
+  // }, []);
 
   return (
     <div style={{ width: "100vw", height: "100svh", overflow: "hidden" }}>
@@ -326,6 +442,7 @@ export default function App() {
         setTitle3DForVase={setTitle3DForVase}
         activeAction={activeAction}
         setActiveAction={setActiveAction}
+        disabled={isLocked}
       />
 
       {/* Debug Stats */}
@@ -364,6 +481,13 @@ export default function App() {
         >
         <ambientLight intensity={0.6} />
         <directionalLight position={[2, 4, 2]} intensity={1} />
+        <Physics
+          colliders={false}
+          gravity={[0, -9.81, 0]}
+          debug={debugPhysics}
+          timeStep={1/90} // smaller fixed timestep improves collision stability
+          interpolation={true}
+        >
         <Suspense fallback={null}>
           {/* Without <Bounds>, we manage camera focusing manually */}
           {Array.from({ length: VASE_COUNT }).map((_, i) => {
@@ -377,28 +501,59 @@ export default function App() {
                 key={i}
                 position={[x, y, 0]}
                 {...(!isActive && {
-                  onPointerDown: (e) => e.stopPropagation(),
+                  onPointerDown: (e) => { e.stopPropagation(); focusVase(i); },
                   onPointerMove: (e) => e.stopPropagation(),
                   onPointerUp: (e) => e.stopPropagation(),
                   onPointerCancel: (e) => e.stopPropagation(),
                   onPointerOut: (e) => e.stopPropagation(),
                 })}
               >
-                <VaseModel
-                  texture={composedTextures[i] || defaultTexture}
-                  rotateWithPointer={isActive}
-                  onVasePointerDown={isActive ? handleVasePointerDown : undefined}
-                />
-                {titles3D[i] && (
-                  <FloatingTitle3D
-                    title={titles3D[i]}
-                    color={baseColors[i]}
-                  />
-                )}
+                <VaseShatterContext.Provider value={{
+                  phase: destroyingIndex === i ? 'exploding' : 'idle',
+                  center: [x, y, 0],
+                  trigger: destroyEventId,
+                }}>
+                  <RigidBody type="fixed" colliders="trimesh">
+                    <VaseModel
+                      texture={composedTextures[i] || defaultTexture}
+                      rotateWithPointer={isActive}
+                      onVasePointerDown={isActive ? handleVasePointerDown : undefined}
+                      shattered={destroyingIndex === i}
+                      shatterTriggerId={destroyEventId}
+                      onShatterComplete={() => {
+                        if (i === destroyingIndex) {
+                          setDestroyingIndex(null);
+                          setIsLocked(false);
+                          // Remove any coins associated with this vase once destruction completes
+                          setCoinsByVase(prev => prev.map((arr, idx) => (idx === i ? [] : arr)));
+                          // Allow this vase to be destroyed again in the future
+                          destroyingVasesRef.current.delete(i);
+                        }
+                      }}
+                    />
+                    {/* Invisible inner colliders approximating the vase walls/base */}
+                    <CuboidCollider args={[0.05, 1.2, 0.8]} position={[0.85, 1.2, 0]} />
+                    <CuboidCollider args={[0.05, 1.2, 0.8]} position={[-0.85, 1.2, 0]} />
+                    <CuboidCollider args={[0.8, 1.2, 0.05]} position={[0, 1.2, 0.85]} />
+                    <CuboidCollider args={[0.8, 1.2, 0.05]} position={[0, 1.2, -0.85]} />
+                    <CuboidCollider args={[0.8, 0.05, 0.8]} position={[0, 0.15, 0]} />
+                  </RigidBody>
+                  {titles3D[i] && (
+                    <FloatingTitle3D
+                      title={titles3D[i]}
+                      color={baseColors[i]}
+                    />
+                  )}
+                  {/* Render coins for this vase using the simple Coin API */}
+                  {coinsByVase[i].map((coin) => (
+                    <Coin key={coin.id} r={1.5} h={0.24} pos={coin.position} rot={coin.rotation} />
+                  ))}
+                </VaseShatterContext.Provider>
               </group>
             );
           })}
         </Suspense>
+        </Physics>
         {/* Removed single global title; per-vase titles handled inline */}
           <OrbitControls
             ref={controlsRef}
@@ -424,6 +579,21 @@ export default function App() {
           />
         </Canvas>
       </div>
+      {/* Lock overlay to disable all interactions during destroy */}
+      {isLocked && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 1000,
+            background: 'rgba(0,0,0,0)',
+            pointerEvents: 'auto',
+          }}
+        />
+      )}
     </div>
   );
 }
