@@ -27,32 +27,42 @@ function useCenterForSpin(object3D) {
   useEffect(() => {
     if (!object3D || centeredRef.current) return;
 
-    // Aggregate bounding box across visible meshes only (ignores empties / helpers)
-    const box = new THREE.Box3();
-    let hasMesh = false;
-    object3D.traverse(child => {
-      if (child.isMesh && child.visible && child.geometry) {
-        const childBox = new THREE.Box3().setFromObject(child);
-        if (!hasMesh) {
-          box.copy(childBox);
-          hasMesh = true;
-        } else {
-          box.union(childBox);
-        }
-      }
-    });
-    if (!hasMesh) return;
+    // Ensure matrices are current
+    object3D.updateWorldMatrix(true, true);
+    const parent = object3D.parent;
 
-    const center = box.getCenter(new THREE.Vector3());
+    // Build box in WORLD space then convert to PARENT-LOCAL so we can safely edit object3D.position (which is in parent space)
+    const worldBox = new THREE.Box3().setFromObject(object3D);
+    if (!isFinite(worldBox.min.x)) return; // nothing to bound
 
-    // Shift only horizontal center
-    object3D.position.x -= center.x;
-    object3D.position.z -= center.z;
-    
-    // Recompute after X/Z shift to find new minY, then lift base to y=0
-    const shiftedBox = new THREE.Box3().setFromObject(object3D);
-    const baseOffset = shiftedBox.min.y; // if negative, raise; if positive, lower
-    object3D.position.y -= baseOffset;
+    const invParent = new THREE.Matrix4();
+    if (parent) {
+      parent.updateWorldMatrix(true, true);
+      invParent.copy(parent.matrixWorld).invert();
+    } else {
+      invParent.identity();
+    }
+
+    // Convert world box to parent-local space
+    const parentLocalBox = worldBox.clone();
+    parentLocalBox.min.applyMatrix4(invParent);
+    parentLocalBox.max.applyMatrix4(invParent);
+
+    const centerParent = parentLocalBox.getCenter(new THREE.Vector3());
+
+    // Shift only horizontal center in PARENT space
+    object3D.position.x -= centerParent.x;
+    object3D.position.z -= centerParent.z;
+
+    // Recompute after X/Z shift and again transform the box to parent-local for base alignment
+    object3D.updateWorldMatrix(true, true);
+    const worldBox2 = new THREE.Box3().setFromObject(object3D);
+    const parentLocalBox2 = worldBox2.clone();
+    parentLocalBox2.min.applyMatrix4(invParent);
+    parentLocalBox2.max.applyMatrix4(invParent);
+
+    const baseOffsetY = parentLocalBox2.min.y; // base in parent space
+    object3D.position.y -= baseOffsetY;
 
     centeredRef.current = true;
   }, [object3D]);

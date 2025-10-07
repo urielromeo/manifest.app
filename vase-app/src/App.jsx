@@ -29,6 +29,10 @@ const CAMERA_HEIGHT = 7; // how high above target the camera sits
 // Compute Z so that sqrt(CAMERA_HEIGHT^2 + z^2) === INITIAL_CAMERA_DISTANCE, preserving displayed zoom value.
 const INITIAL_CAMERA_Z = Math.max(0, Math.sqrt(Math.max(0, INITIAL_CAMERA_DISTANCE * INITIAL_CAMERA_DISTANCE - CAMERA_HEIGHT * CAMERA_HEIGHT)));
 
+// Title scene camera/target (kept far away so both scenes render simultaneously)
+const TITLE_TARGET = new THREE.Vector3(0, 4, -100);
+const TITLE_CAMERA_POS = new THREE.Vector3(0, 7, -92);
+
 // --- Helper component for camera reset animation ---
 const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3); // hoisted to avoid re-allocation each frame
 function CameraResetAnimator({ controlsRef, resetRef, onDone }) {
@@ -65,6 +69,12 @@ function CameraResetAnimator({ controlsRef, resetRef, onDone }) {
 export default function App() {
   const isTest1 = typeof window !== 'undefined' && window.location.pathname === '/test-1';
   if (isTest1) return <Test1Page />;
+  // App mode: title screen vs vases
+  const [appMode, setAppMode] = useState('title'); // 'title' | 'vases'
+  const [isConnecting, setIsConnecting] = useState(false);
+  const connectTimerRef = useRef(null);
+  // Optional hook to run custom logic after a camera reset/transition completes
+  const onResetDoneOnceRef = useRef(null);
   // Per-vase texture source stacks & metadata
   const [textureSourcesList, setTextureSourcesList] = useState(
     () => Array.from({ length: VASE_COUNT }, () => ({ base: null, upload: null, camera: null, text: null }))
@@ -157,7 +167,7 @@ export default function App() {
     setIsResetting(true);
   }, []);
 
-  // Focus camera on a given vase index (wrap-around) while preserving current distance & view direction
+   // Focus camera on a given vase index (wrap-around) while preserving current distance & view direction
   // Helper to compute vase target position from index (grid layout)
   const getVaseTarget = useCallback((idx) => {
     const col = idx % VASE_COLUMNS_COUNT;
@@ -169,6 +179,33 @@ export default function App() {
     return new THREE.Vector3(col * VASE_SPACING, targetY, 0);
   }, []);
 
+
+  // Smooth transition from title camera to current vase view
+  const startTitleToVasesTransition = useCallback(() => {
+    if (!controlsRef.current) return;
+    const cam = controlsRef.current.object;
+    const newTarget = getVaseTarget(activeVaseIndex);
+    const offset = defaultOffset.current.clone(); // preserve standard distance/orientation for vase view
+    const toPos = newTarget.clone().add(offset);
+    // Update defaults to the vase view going forward
+    defaultTarget.current.copy(newTarget);
+    defaultDir.current.copy(offset.clone().normalize());
+    // Animate camera and controls target
+    resetRef.current = {
+      fromPos: cam.position.clone(),
+      toPos,
+      fromTarget: controlsRef.current.target.clone(),
+      toTarget: newTarget.clone(),
+      elapsed: 0,
+      duration: 1.2,
+      posEpsSq: 0.05 * 0.05,
+      targetEpsSq: 0.025 * 0.025,
+      minProgressForEarlyEnd: 0.55,
+    };
+    setIsResetting(true);
+  }, [activeVaseIndex, getVaseTarget]);
+
+ 
   const focusVase = useCallback((index) => {
     if (!controlsRef.current) return;
     const cam = controlsRef.current.object;
@@ -200,6 +237,7 @@ export default function App() {
 
   // Keyboard navigation between vases and simple coin spawn on Space
   useEffect(() => {
+    if (appMode !== 'vases') return; // disable during title
     const onKey = (e) => {
       if (e.key === 'ArrowRight') {
         focusVase(activeVaseIndex + 1);
@@ -212,7 +250,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [focusVase, activeVaseIndex, isLocked, spawnCoinForVase]);
+  }, [appMode, focusVase, activeVaseIndex, isLocked, spawnCoinForVase]);
 
   // Helpers to update per-vase structures
   const setTextureSourcesForVase = useCallback((index, updater) => {
@@ -348,14 +386,14 @@ export default function App() {
   // Pointer logic
   const handleCanvasPointerDown = useCallback(() => {
     // If we're not currently dragging the vase and not resetting, enter camera mode
-    if (isLocked) return;
+    if (isLocked || appMode !== 'vases') return;
     if (draggingMode === null && !isResetting) setDraggingMode("camera");
-  }, [draggingMode, isResetting, isLocked]);
+  }, [draggingMode, isResetting, isLocked, appMode]);
 
   // Global pointerup to finalize drags
   useEffect(() => {
     const up = () => {
-      if (isLocked) return;
+      if (isLocked || appMode !== 'vases') return;
       if (draggingMode === "camera") {
         // Start reset back to default orientation (keep distance)
         startCameraReset();
@@ -365,18 +403,18 @@ export default function App() {
     };
     window.addEventListener("pointerup", up);
     return () => window.removeEventListener("pointerup", up);
-  }, [draggingMode, startCameraReset, isLocked]);
+  }, [draggingMode, startCameraReset, isLocked, appMode]);
 
   const handleVasePointerDown = useCallback((e) => {
     if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
-    if (isResetting || isLocked) return;
+    if (isResetting || isLocked || appMode !== 'vases') return;
     setDraggingMode("vase");
-  }, [isResetting, isLocked]);
+  }, [isResetting, isLocked, appMode]);
 
   // Extra safety: if pointer gets canceled or window/tab loses focus, gracefully end drag
   useEffect(() => {
     const cancel = () => {
-      if (isLocked) return;
+      if (isLocked || appMode !== 'vases') return;
       if (draggingMode === "camera") {
         startCameraReset();
       } else if (draggingMode === "vase") {
@@ -392,18 +430,18 @@ export default function App() {
       window.removeEventListener('blur', cancel);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [draggingMode, startCameraReset, isLocked]);
+  }, [draggingMode, startCameraReset, isLocked, appMode]);
 
   // Keep OrbitControls mounted & active so first pointer move rotates immediately.
   // We dynamically enable/disable rotate & pan based on draggingMode to avoid
   // missing the initial pointerdown event when we previously relied on props.
   useEffect(() => {
     if (!controlsRef.current) return;
-    const allowCamera = draggingMode !== "vase" && !isResetting && !isLocked;
+    const allowCamera = appMode === 'vases' && draggingMode !== "vase" && !isResetting && !isLocked;
     controlsRef.current.enableRotate = allowCamera;
     controlsRef.current.enablePan = allowCamera;
     controlsRef.current.enableZoom = allowCamera;
-  }, [draggingMode, isResetting, isLocked]);
+  }, [draggingMode, isResetting, isLocked, appMode]);
 
   // Prevent keyboard vase switching when locked
   useEffect(() => {
@@ -432,18 +470,20 @@ export default function App() {
 
   return (
     <div style={{ width: "100vw", height: "100svh", overflow: "hidden" }}>
-      <Sidebars
-        ref={bottomBarRef}
-        activeVaseIndex={activeVaseIndex}
-        titles3D={titles3D}
-        setTextureSourcesForVase={setTextureSourcesForVase}
-        setActiveBaseLayerForVase={setActiveBaseLayerForVase}
-        setBaseColorForVase={setBaseColorForVase}
-        setTitle3DForVase={setTitle3DForVase}
-        activeAction={activeAction}
-        setActiveAction={setActiveAction}
-        disabled={isLocked}
-      />
+      {appMode === 'vases' && (
+        <Sidebars
+          ref={bottomBarRef}
+          activeVaseIndex={activeVaseIndex}
+          titles3D={titles3D}
+          setTextureSourcesForVase={setTextureSourcesForVase}
+          setActiveBaseLayerForVase={setActiveBaseLayerForVase}
+          setBaseColorForVase={setBaseColorForVase}
+          setTitle3DForVase={setTitle3DForVase}
+          activeAction={activeAction}
+          setActiveAction={setActiveAction}
+          disabled={isLocked}
+        />
+      )}
 
       {/* Debug Stats */}
       <div
@@ -462,6 +502,12 @@ export default function App() {
       >
         current zoom: {currentZoom.toFixed(2)} | mode: {draggingMode || "idle"} | active vase: {activeVaseIndex}
         {isResetting ? " (resetting)" : ""}
+        <button
+          onClick={() => setDebugPhysics(v => !v)}
+          style={{ marginLeft: 8, padding: '2px 6px', fontSize: 11 }}
+        >
+          physics: {debugPhysics ? 'on' : 'off'}
+        </button>
       </div>
 
       <div
@@ -476,7 +522,7 @@ export default function App() {
         }}
       >
         <Canvas
-          camera={{ position: [0, CAMERA_HEIGHT, INITIAL_CAMERA_Z], fov: 50 }}
+          camera={{ position: appMode === 'title' ? [TITLE_CAMERA_POS.x, TITLE_CAMERA_POS.y, TITLE_CAMERA_POS.z] : [0, CAMERA_HEIGHT, INITIAL_CAMERA_Z], fov: 50 }}
           onPointerDown={handleCanvasPointerDown}
         >
         <ambientLight intensity={0.6} />
@@ -537,6 +583,8 @@ export default function App() {
                     <CuboidCollider args={[0.8, 1.2, 0.05]} position={[0, 1.2, 0.85]} />
                     <CuboidCollider args={[0.8, 1.2, 0.05]} position={[0, 1.2, -0.85]} />
                     <CuboidCollider args={[0.8, 0.05, 0.8]} position={[0, 0.15, 0]} />
+                    {/* Wider pedestal to catch missed coins */}
+                    <CuboidCollider args={[2.5, 0.1, 2.5]} position={[0, 0, 0]} />
                   </RigidBody>
                   {titles3D[i] && (
                     <FloatingTitle3D
@@ -553,7 +601,20 @@ export default function App() {
             );
           })}
         </Suspense>
+        {/* Global catch floor far below the grid to diagnose falling bodies */}
+        <RigidBody type="fixed">
+          <CuboidCollider args={[1000, 0.5, 1000]} position={[0, -200, 0]} />
+        </RigidBody>
         </Physics>
+        {/* Title screen 3D text (rendered far away so both scenes coexist) */}
+        {(appMode === 'title' || isConnecting) && (
+          <FloatingTitle3D
+            title={isConnecting ? 'CONNECTING...' : 'activity tracker'}
+            position={[TITLE_TARGET.x, TITLE_TARGET.y, TITLE_TARGET.z]}
+            size={3.6}
+            color="#333333"
+          />
+        )}
         {/* Removed single global title; per-vase titles handled inline */}
           <OrbitControls
             ref={controlsRef}
@@ -566,7 +627,7 @@ export default function App() {
             minDistance={3}
             maxDistance={28}
             onChange={handleControlsChange}
-            target={[defaultTarget.current.x, defaultTarget.current.y, defaultTarget.current.z]}
+            target={appMode === 'title' ? [TITLE_TARGET.x, TITLE_TARGET.y, TITLE_TARGET.z] : [defaultTarget.current.x, defaultTarget.current.y, defaultTarget.current.z]}
           />
 
           <CameraResetAnimator
@@ -575,10 +636,63 @@ export default function App() {
             onDone={() => {
               setIsResetting(false);
               setDraggingMode(null);
+              if (onResetDoneOnceRef.current) {
+                const fn = onResetDoneOnceRef.current;
+                onResetDoneOnceRef.current = null;
+                fn();
+              }
             }}
           />
         </Canvas>
       </div>
+      {/* Title screen overlay UI */}
+      {appMode === 'title' && (
+        <div
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            top: 0,
+            bottom: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            pointerEvents: 'none', // pass-through except for button
+          }}
+        >
+          <button
+            onClick={() => {
+              if (isConnecting) return;
+              setIsConnecting(true);
+              // After 3-5s, start smooth camera move to vases, then swap UI mode on completion
+              const delay = 3000 + Math.random() * 2000;
+              connectTimerRef.current = setTimeout(() => {
+                onResetDoneOnceRef.current = () => {
+                  setAppMode('vases');
+                  setIsConnecting(false);
+                };
+                startTitleToVasesTransition();
+              }, delay);
+            }}
+            disabled={isConnecting}
+            style={{
+              pointerEvents: 'auto',
+              position: 'absolute',
+              transform: 'translateY(30vh)', // slightly below vertical center
+              padding: '14px 28px',
+              fontSize: 16,
+              borderRadius: 9999,
+              border: '1px solid #111',
+              background: isConnecting ? '#ddd' : '#fff',
+              color: '#111',
+              cursor: isConnecting ? 'default' : 'pointer',
+              boxShadow: '0 4px 14px rgba(0,0,0,0.1)'
+            }}
+          >
+            {isConnecting ? 'CONNECTING…' : 'Connect'}
+          </button>
+        </div>
+      )}
       {/* Lock overlay to disable all interactions during destroy */}
       {isLocked && (
         <div
