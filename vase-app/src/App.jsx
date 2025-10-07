@@ -133,6 +133,18 @@ export default function App() {
 
   const controlsRef = useRef(null);
 
+  // One-time title size to fit viewport (non-reactive)
+  const [titleSize, setTitleSize] = useState(1);
+  useEffect(() => {
+    // Use the smaller viewport dimension so it fits on both portrait/landscape
+    // The 0.008 factor is empirically chosen to look good with current camera
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 800;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 600;
+    const size = Math.min(vw, vh) * 0.0008;
+    setTitleSize(size);
+    // Intentionally no resize listener: compute once only
+  }, []);
+
   // Defaults & reset helpers
   // Set initial camera so its radial distance to target is INITIAL_CAMERA_DISTANCE while being raised by CAMERA_HEIGHT.
   const defaultTarget = useRef(new THREE.Vector3(0, VASE_TARGET_Y, 0));
@@ -611,7 +623,8 @@ export default function App() {
           <FloatingTitle3D
             title={isConnecting ? 'CONNECTING...' : 'activity tracker'}
             position={[TITLE_TARGET.x, TITLE_TARGET.y, TITLE_TARGET.z]}
-            size={3.6}
+            size={titleSize}
+            thickness={0.15}
             color="#333333"
           />
         )}
