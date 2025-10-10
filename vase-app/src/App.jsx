@@ -794,6 +794,8 @@ export default function App() {
           onColorPicked={handleColorPicked}
           colorInputRef={colorInputRef}
           barRef={bottomBarRef}
+          onCameraCanvas={(c) => setTextureSourcesForVase(activeVaseIndex, s => ({ ...s, camera: c }))}
+          onCameraSetActive={() => setActiveBaseLayerForVase(activeVaseIndex, 'camera')}
         />
       )}
 
