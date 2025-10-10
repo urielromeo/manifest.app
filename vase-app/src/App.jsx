@@ -10,11 +10,11 @@ import Sidebars from './components/Sidebars.jsx';
 import useComposedTexture from './hooks/useComposedTexture.js';
 import Coin from './components/Coin.jsx';
 import Test1Page from './components/Test1.jsx';
+import { loadOrInitVases, mapVasesToUiState } from './services/vases.js';
 
 export const VaseShatterContext = React.createContext({ phase: 'idle', center: [0,0,0], trigger: 0 });
 
 const BOUNDS_MARGIN = 2.15; // (kept for potential future use)
-
 
 // Multi-vase configuration
 const VASE_COUNT = 9; // Adjust this number to render more or fewer vases
@@ -24,7 +24,7 @@ const VASE_SPACING = 20; // Horizontal (X) and vertical (Y) spacing between vase
 // Camera / focus tuning
 // Keep target at vase base (y=0), but raise the camera itself.
 const VASE_TARGET_Y = 4; // look-at stays here
-const INITIAL_CAMERA_DISTANCE = 28; // desired radial distance (reported as zoom)
+const INITIAL_CAMERA_DISTANCE = 32; // desired radial distance (reported as zoom)
 const CAMERA_HEIGHT = 7; // how high above target the camera sits
 // Compute Z so that sqrt(CAMERA_HEIGHT^2 + z^2) === INITIAL_CAMERA_DISTANCE, preserving displayed zoom value.
 const INITIAL_CAMERA_Z = Math.max(0, Math.sqrt(Math.max(0, INITIAL_CAMERA_DISTANCE * INITIAL_CAMERA_DISTANCE - CAMERA_HEIGHT * CAMERA_HEIGHT)));
@@ -88,6 +88,8 @@ export default function App() {
   const [titles3D, setTitles3D] = useState(
     () => Array.from({ length: VASE_COUNT }, () => '')
   );
+  // In-memory vases loaded from storage (no autosave yet)
+  const [vases, setVases] = useState([]);
   const [activeAction, setActiveAction] = useState(null);
   const [currentZoom, setCurrentZoom] = useState(INITIAL_CAMERA_DISTANCE);
   const [activeVaseIndex, setActiveVaseIndex] = useState(0); // which vase camera is focused on
@@ -132,6 +134,116 @@ export default function App() {
   const [isResetting, setIsResetting] = useState(false);
 
   const controlsRef = useRef(null);
+  // Hold-to-repeat navigation support
+  const holdTimerRef = useRef(null);
+  const holdIntervalRef = useRef(null);
+  const activeVaseIndexRef = useRef(0);
+  useEffect(() => { activeVaseIndexRef.current = activeVaseIndex; }, [activeVaseIndex]);
+
+  const stopHoldNav = useCallback(() => {
+    if (holdTimerRef.current) {
+      clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+    if (holdIntervalRef.current) {
+      clearInterval(holdIntervalRef.current);
+      holdIntervalRef.current = null;
+    }
+  }, []);
+
+   // Focus camera on a given vase index (wrap-around) while preserving current distance & view direction
+  // Helper to compute vase target position from index (grid layout)
+  const getVaseTarget = useCallback((idx) => {
+    const col = idx % VASE_COLUMNS_COUNT;
+    const row = Math.floor(idx / VASE_COLUMNS_COUNT);
+    // Arrange vases downward along -Y (screen vertical) instead of pushing back on Z.
+    // Target's Y should remain VASE_TARGET_Y units above the vase group's base Y.
+    const baseY = -row * VASE_SPACING; // group Y position
+    const targetY = baseY + VASE_TARGET_Y;
+    return new THREE.Vector3(col * VASE_SPACING, targetY, 0);
+  }, []);
+   
+  const focusVase = useCallback((index) => {
+    if (!controlsRef.current) return;
+    const cam = controlsRef.current.object;
+    const wrapped = ((index % VASE_COUNT) + VASE_COUNT) % VASE_COUNT;
+    if (wrapped === activeVaseIndex) return;
+    const newTarget = getVaseTarget(wrapped);
+    // Preserve current offset vector (camera relative location) to keep orientation & distance stable
+    const offset = cam.position.clone().sub(controlsRef.current.target);
+    const toPos = newTarget.clone().add(offset);
+    // Update persistent defaults (direction & offset) for subsequent resets
+    defaultTarget.current.copy(newTarget);
+    defaultDir.current.copy(offset.clone().normalize());
+    defaultOffset.current.copy(offset);
+    resetRef.current = {
+      fromPos: cam.position.clone(),
+      toPos,
+      fromTarget: controlsRef.current.target.clone(),
+      toTarget: newTarget.clone(),
+      elapsed: 0,
+      duration: 0.7,
+      posEpsSq: 0.05 * 0.05,
+      targetEpsSq: 0.025 * 0.025,
+      minProgressForEarlyEnd: 0.5,
+    };
+    setActiveVaseIndex(wrapped);
+    setIsResetting(true);
+    setDraggingMode(null);
+  }, [activeVaseIndex, getVaseTarget]);
+
+
+  const startHoldNav = useCallback((dir) => {
+    if (isLocked || isResetting || appMode !== 'vases') return;
+    // Immediate step on press
+    focusVase(activeVaseIndexRef.current + dir);
+    // After a short delay, start repeating
+    holdTimerRef.current = setTimeout(() => {
+      holdIntervalRef.current = setInterval(() => {
+        if (isLocked || isResetting || appMode !== 'vases') return;
+        focusVase(activeVaseIndexRef.current + dir);
+      }, 140);
+    }, 320);
+  }, [focusVase, isLocked, isResetting, appMode]);
+
+  // Stop any hold if state changes or on unmount
+  useEffect(() => stopHoldNav(), [isLocked, isResetting, appMode, stopHoldNav]);
+  useEffect(() => () => stopHoldNav(), [stopHoldNav]);
+
+  // Load or initialize vases from storage on first mount; populate UI state only (no autosave yet)
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const vases = await loadOrInitVases();
+      if (!mounted) return;
+      setVases(vases);
+      const mapped = mapVasesToUiState(vases);
+      setTextureSourcesList(mapped.textureSourcesList);
+      setActiveBaseLayers(mapped.activeBaseLayers);
+      setBaseColors(mapped.baseColors);
+      setTitles3D(mapped.titles3D);
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  // Human-friendly "time ago" formatter for createdAt
+  const formatTimeAgo = useCallback((iso) => {
+    if (!iso) return '';
+    const then = new Date(iso).getTime();
+    const now = Date.now();
+    const s = Math.max(0, Math.floor((now - then) / 1000));
+    if (s < 45) return 'just now';
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m} min${m === 1 ? '' : 's'}`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h} hour${h === 1 ? '' : 's'}`;
+    const d = Math.floor(h / 24);
+    if (d < 30) return `${d} day${d === 1 ? '' : 's'}`;
+    const mo = Math.floor(d / 30);
+    if (mo < 12) return `${mo} month${mo === 1 ? '' : 's'}`;
+    const y = Math.floor(mo / 12);
+    return `${y} year${y === 1 ? '' : 's'}`;
+  }, []);
 
   // One-time title size to fit viewport (non-reactive)
   const [titleSize, setTitleSize] = useState(1);
@@ -179,19 +291,6 @@ export default function App() {
     setIsResetting(true);
   }, []);
 
-   // Focus camera on a given vase index (wrap-around) while preserving current distance & view direction
-  // Helper to compute vase target position from index (grid layout)
-  const getVaseTarget = useCallback((idx) => {
-    const col = idx % VASE_COLUMNS_COUNT;
-    const row = Math.floor(idx / VASE_COLUMNS_COUNT);
-    // Arrange vases downward along -Y (screen vertical) instead of pushing back on Z.
-    // Target's Y should remain VASE_TARGET_Y units above the vase group's base Y.
-    const baseY = -row * VASE_SPACING; // group Y position
-    const targetY = baseY + VASE_TARGET_Y;
-    return new THREE.Vector3(col * VASE_SPACING, targetY, 0);
-  }, []);
-
-
   // Smooth transition from title camera to current vase view
   const startTitleToVasesTransition = useCallback(() => {
     if (!controlsRef.current) return;
@@ -217,35 +316,6 @@ export default function App() {
     setIsResetting(true);
   }, [activeVaseIndex, getVaseTarget]);
 
- 
-  const focusVase = useCallback((index) => {
-    if (!controlsRef.current) return;
-    const cam = controlsRef.current.object;
-    const wrapped = ((index % VASE_COUNT) + VASE_COUNT) % VASE_COUNT;
-    if (wrapped === activeVaseIndex) return;
-    const newTarget = getVaseTarget(wrapped);
-    // Preserve current offset vector (camera relative location) to keep orientation & distance stable
-    const offset = cam.position.clone().sub(controlsRef.current.target);
-    const toPos = newTarget.clone().add(offset);
-    // Update persistent defaults (direction & offset) for subsequent resets
-    defaultTarget.current.copy(newTarget);
-    defaultDir.current.copy(offset.clone().normalize());
-    defaultOffset.current.copy(offset);
-    resetRef.current = {
-      fromPos: cam.position.clone(),
-      toPos,
-      fromTarget: controlsRef.current.target.clone(),
-      toTarget: newTarget.clone(),
-      elapsed: 0,
-      duration: 0.7,
-      posEpsSq: 0.05 * 0.05,
-      targetEpsSq: 0.025 * 0.025,
-      minProgressForEarlyEnd: 0.5,
-    };
-    setActiveVaseIndex(wrapped);
-    setIsResetting(true);
-    setDraggingMode(null);
-  }, [activeVaseIndex, getVaseTarget]);
 
   // Keyboard navigation between vases and simple coin spawn on Space
   useEffect(() => {
@@ -482,7 +552,29 @@ export default function App() {
 
   return (
     <div style={{ width: "100vw", height: "100svh", overflow: "hidden" }}>
-      {appMode === 'vases' && (
+      {/* Top-center info bar showing creation time for the active vase (vases mode only) */}
+      {appMode === 'vases' && vases[activeVaseIndex] && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 8,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 12,
+            background: 'rgba(0,0,0,0.55)',
+            color: 'white',
+            padding: '6px 10px',
+            borderRadius: 6,
+            fontSize: 12,
+            fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif',
+            pointerEvents: 'none',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          created {formatTimeAgo(vases[activeVaseIndex]?.createdAt)} ago
+        </div>
+      )}
+      {false && appMode === 'vases' && (
         <Sidebars
           ref={bottomBarRef}
           activeVaseIndex={activeVaseIndex}
@@ -497,9 +589,69 @@ export default function App() {
         />
       )}
 
+      {/* Simple navigation UI for vase mode: transparent container with two buttons */}
+      {appMode === 'vases' && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 16,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 12,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            background: 'transparent',
+            pointerEvents: 'auto',
+          }}
+        >
+          <button
+            onClick={() => focusVase(activeVaseIndex - 1)}
+            onPointerDown={(e) => { e.preventDefault(); startHoldNav(-1); }}
+            onPointerUp={stopHoldNav}
+            onPointerLeave={stopHoldNav}
+            onPointerCancel={stopHoldNav}
+            disabled={isLocked || isResetting}
+            style={{
+              padding: '10px 14px',
+              fontSize: 16,
+              borderRadius: 8,
+              border: '1px solid #000',
+              background: '#fff',
+              color: '#000',
+              cursor: 'pointer',
+              width: 48,
+            }}
+          >
+            &lt;-
+          </button>
+          <button
+            onClick={() => focusVase(activeVaseIndex + 1)}
+            onPointerDown={(e) => { e.preventDefault(); startHoldNav(1); }}
+            onPointerUp={stopHoldNav}
+            onPointerLeave={stopHoldNav}
+            onPointerCancel={stopHoldNav}
+            disabled={isLocked || isResetting}
+            style={{
+              padding: '10px 14px',
+              fontSize: 16,
+              borderRadius: 8,
+              border: '1px solid #000',
+              background: '#fff',
+              color: '#000',
+              cursor: 'pointer',
+              width: 48,
+            }}
+          >
+            -&gt;
+          </button>
+        </div>
+      )}
+
       {/* Debug Stats */}
       <div
         style={{
+          display: "none",
           position: "absolute",
           bottom: 12,
           right: 12,
@@ -638,7 +790,7 @@ export default function App() {
             enablePan
             enableZoom={true}
             minDistance={3}
-            maxDistance={28}
+            maxDistance={32}
             onChange={handleControlsChange}
             target={appMode === 'title' ? [TITLE_TARGET.x, TITLE_TARGET.y, TITLE_TARGET.z] : [defaultTarget.current.x, defaultTarget.current.y, defaultTarget.current.z]}
           />

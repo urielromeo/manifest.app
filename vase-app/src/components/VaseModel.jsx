@@ -303,7 +303,7 @@ export default function VaseModel({
     if (Math.abs(dragState.current.angularVelocity) < 0.0001) {
       dragState.current.angularVelocity = 0;
     }
-    if (e.target.releasePointerCapture) {
+    if (e.target?.releasePointerCapture) {
       try { e.target.releasePointerCapture(e.pointerId); } catch {}
     }
   };
