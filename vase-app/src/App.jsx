@@ -20,6 +20,7 @@ import { createSolidColorCanvas, createTextOverlayCanvas } from "./utils/canvas.
 import CameraResetAnimator from './components/camera/CameraResetAnimator.jsx';
 import useVaseDesignState from './hooks/useVaseDesignState.js';
 import useCoinsByVase from './hooks/useCoinsByVase.js';
+import { saveCanvasAsTexture, loadCanvasFromTextureRef } from './services/textures.js';
 
 export const VaseShatterContext = React.createContext({ phase: 'idle', center: [0,0,0], trigger: 0 });
 
@@ -96,6 +97,12 @@ export default function App() {
   const containerRef = useRef(null);
 
   const controlsRef = useRef(null);
+  // Track last persisted canvases to avoid redundant writes
+  const prevTexturesRef = useRef(
+    Array.from({ length: VASE_COUNT }, () => ({ base: null, upload: null, camera: null }))
+  );
+  const prevActiveLayerRef = useRef(Array.from({ length: VASE_COUNT }, () => 'base'));
+  const prevBaseColorsRef = useRef(Array.from({ length: VASE_COUNT }, () => '#ffffff'));
   // Hold-to-repeat navigation support
   const holdTimerRef = useRef(null);
   const holdIntervalRef = useRef(null);
@@ -170,13 +177,96 @@ export default function App() {
       setVases(vases);
       const mapped = mapVasesToUiState(vases);
       // Initialize design state from storage mapping
-      setTextureSourcesList(mapped.textureSourcesList);
+      // Hydrate TextureRef objects into canvases for the compositor
+      const hydrated = await Promise.all(
+        mapped.textureSourcesList.map(async (entry, i) => {
+          const base = entry.base ? await loadCanvasFromTextureRef(entry.base, 1024) : null;
+          const upload = entry.upload ? await loadCanvasFromTextureRef(entry.upload, 1024) : null;
+          const camera = entry.camera ? await loadCanvasFromTextureRef(entry.camera, 1024) : null;
+          // If textOverlay string exists on the model, regenerate its canvas overlay
+          const textStr = vases[i]?.appearance?.textureSlots?.textOverlay || '';
+          const text = textStr ? createTextOverlayCanvas(textStr, 1024) : null;
+          return { base, upload, camera, text };
+        })
+      );
+      setTextureSourcesList(hydrated);
+      // Seed previous trackers to hydrated values to avoid immediate re-persist
+      prevTexturesRef.current = hydrated.map(({ base, upload, camera }) => ({ base, upload, camera }));
+      prevActiveLayerRef.current = mapped.activeBaseLayers.slice();
+      prevBaseColorsRef.current = mapped.baseColors.slice();
       setActiveBaseLayers(mapped.activeBaseLayers);
       setBaseColors(mapped.baseColors);
       setTitles3D(mapped.titles3D);
     })();
     return () => { mounted = false; };
   }, []);
+
+  // Persist newly assigned canvases or layer/color changes into storage
+  useEffect(() => {
+    // Compare and persist per vase
+    textureSourcesList.forEach((entry, i) => {
+      const prev = prevTexturesRef.current[i];
+      // base
+      if (entry.base && entry.base !== prev.base) {
+        (async () => {
+          try {
+            const ref = await saveCanvasAsTexture(entry.base, 'image/png');
+            const updated = await updateVaseAt(vases, i, { appearance: { textureSlots: { base: ref } } });
+            setVases(updated);
+          } catch (e) { console.warn('Persist base texture failed', e); }
+        })();
+        prev.base = entry.base;
+      }
+      // upload
+      if (entry.upload && entry.upload !== prev.upload) {
+        (async () => {
+          try {
+            const ref = await saveCanvasAsTexture(entry.upload, 'image/jpeg');
+            const updated = await updateVaseAt(vases, i, { appearance: { textureSlots: { upload: ref } } });
+            setVases(updated);
+          } catch (e) { console.warn('Persist upload texture failed', e); }
+        })();
+        prev.upload = entry.upload;
+      }
+      // camera
+      if (entry.camera && entry.camera !== prev.camera) {
+        (async () => {
+          try {
+            const ref = await saveCanvasAsTexture(entry.camera, 'image/jpeg');
+            const updated = await updateVaseAt(vases, i, { appearance: { textureSlots: { camera: ref } } });
+            setVases(updated);
+          } catch (e) { console.warn('Persist camera texture failed', e); }
+        })();
+        prev.camera = entry.camera;
+      }
+    });
+
+    // Active base layer changes
+    activeBaseLayers.forEach((layer, i) => {
+      if (layer !== prevActiveLayerRef.current[i]) {
+        (async () => {
+          try {
+            const updated = await updateVaseAt(vases, i, { appearance: { activeBaseLayer: layer } });
+            setVases(updated);
+          } catch (e) { console.warn('Persist activeBaseLayer failed', e); }
+        })();
+        prevActiveLayerRef.current[i] = layer;
+      }
+    });
+
+    // Base color changes (e.g., via desktop sidebar panel)
+    baseColors.forEach((col, i) => {
+      if (col && col !== prevBaseColorsRef.current[i]) {
+        (async () => {
+          try {
+            const updated = await updateVaseAt(vases, i, { appearance: { baseColor: col } });
+            setVases(updated);
+          } catch (e) { console.warn('Persist baseColor failed', e); }
+        })();
+        prevBaseColorsRef.current[i] = col;
+      }
+    });
+  }, [textureSourcesList, activeBaseLayers, baseColors, vases]);
 
   // One-time title size to fit viewport (non-reactive)
   const [titleSize, setTitleSize] = useState(1);
@@ -529,10 +619,28 @@ export default function App() {
     const s = input.trim();
     if (!s) {
       setTextureSourcesForVase(activeVaseIndex, (prev) => ({ ...prev, text: null }));
+      (async () => {
+        try {
+          const updated = await updateVaseAt(vases, activeVaseIndex, {
+            appearance: { textureSlots: { textOverlay: '' } },
+          });
+          setVases(updated);
+        } catch (e) { console.warn('Failed to persist textOverlay clear', e); }
+      })();
       return;
     }
     const canvas = createTextOverlayCanvas(s, 1024);
-    if (canvas) setTextureSourcesForVase(activeVaseIndex, (prev) => ({ ...prev, text: canvas }));
+    if (canvas) {
+      setTextureSourcesForVase(activeVaseIndex, (prev) => ({ ...prev, text: canvas }));
+      (async () => {
+        try {
+          const updated = await updateVaseAt(vases, activeVaseIndex, {
+            appearance: { textureSlots: { textOverlay: s } },
+          });
+          setVases(updated);
+        } catch (e) { console.warn('Failed to persist textOverlay', e); }
+      })();
+    }
   }, [appMode, isLocked, isResetting, activeVaseIndex, setTextureSourcesForVase, createTextOverlayCanvas]);
 
   const handleSet3DTitle = useCallback(() => {
@@ -558,6 +666,25 @@ export default function App() {
     const canvas = createSolidColorCanvas(val, 1024);
     if (canvas) setTextureSourcesForVase(idx, (prev) => ({ ...prev, base: canvas }));
     setActiveBaseLayerForVase(idx, 'base');
+    // Persist base color and base canvas as a stored texture
+    (async () => {
+      try {
+        let baseRef = null;
+        if (canvas) {
+          baseRef = await saveCanvasAsTexture(canvas, 'image/png');
+        }
+        const updated = await updateVaseAt(vases, idx, {
+          appearance: {
+            baseColor: val,
+            activeBaseLayer: 'base',
+            textureSlots: { base: baseRef || undefined },
+          },
+        });
+        setVases(updated);
+      } catch (err) {
+        console.warn('Failed to persist base color/texture', err);
+      }
+    })();
   }, [activeVaseIndex, setBaseColorForVase, setTextureSourcesForVase, setActiveBaseLayerForVase, createSolidColorCanvas]);
 
   // Stats modal callbacks
@@ -582,6 +709,11 @@ export default function App() {
         stats: { destroyCount: 0, coinAmount: 0 },
         // Also reset creation time so it appears as newly created
         createdAt: new Date().toISOString(),
+        appearance: {
+          baseColor: '#ffffff',
+          activeBaseLayer: 'base',
+          textureSlots: { base: undefined, upload: undefined, camera: undefined, textOverlay: '' },
+        },
       });
       setVases(updated);
       // Reset local UI state for this vase
@@ -794,7 +926,21 @@ export default function App() {
           onColorPicked={handleColorPicked}
           colorInputRef={colorInputRef}
           barRef={bottomBarRef}
-          onCameraCanvas={(c) => setTextureSourcesForVase(activeVaseIndex, s => ({ ...s, camera: c }))}
+          onCameraCanvas={(c) => {
+            setTextureSourcesForVase(activeVaseIndex, s => ({ ...s, camera: c }));
+            (async () => {
+              try {
+                const ref = await saveCanvasAsTexture(c, 'image/jpeg');
+                const updated = await updateVaseAt(vases, activeVaseIndex, {
+                  appearance: {
+                    activeBaseLayer: 'camera',
+                    textureSlots: { camera: ref },
+                  },
+                });
+                setVases(updated);
+              } catch (e) { console.warn('Failed to persist camera texture', e); }
+            })();
+          }}
           onCameraSetActive={() => setActiveBaseLayerForVase(activeVaseIndex, 'camera')}
         />
       )}
