@@ -1,5 +1,6 @@
 import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback, useContext } from "react";
 import "./App.css";
+import { VASE_COUNT, VASE_COLUMNS_COUNT, VASE_SPACING, VASE_TARGET_Y, INITIAL_CAMERA_DISTANCE, CAMERA_HEIGHT, INITIAL_CAMERA_Z } from './config/constants.js';
 import * as THREE from "three";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, useGLTF } from "@react-three/drei";
@@ -12,24 +13,17 @@ import Coin from './components/Coin.jsx';
 import Test1Page from './components/Test1.jsx';
 import { loadOrInitVases, mapVasesToUiState, updateVaseAt } from './services/vases.js';
 import UIButton from './components/ui/UIButton.jsx';
-import { ArrowLeft, ArrowRight } from 'lucide-react';
+import NavigationBar from './components/ui/NavigationBar.jsx';
+import { getVaseTarget } from "./utils/layout.js";
+import { formatTimeAgo } from "./utils/time.js";
+import { createSolidColorCanvas, createTextOverlayCanvas } from "./utils/canvas.js";
+import CameraResetAnimator from './components/camera/CameraResetAnimator.jsx';
+import useVaseDesignState from './hooks/useVaseDesignState.js';
+import useCoinsByVase from './hooks/useCoinsByVase.js';
 
 export const VaseShatterContext = React.createContext({ phase: 'idle', center: [0,0,0], trigger: 0 });
 
 const BOUNDS_MARGIN = 2.15; // (kept for potential future use)
-
-// Multi-vase configuration
-const VASE_COUNT = 9; // Adjust this number to render more or fewer vases
-const VASE_COLUMNS_COUNT = 3; // Number of columns before wrapping to a new row
-const VASE_SPACING = 25; // Horizontal (X) and vertical (Y) spacing between vases in the grid
-
-// Camera / focus tuning
-// Keep target at vase base (y=0), but raise the camera itself.
-const VASE_TARGET_Y = 4; // look-at stays here
-const INITIAL_CAMERA_DISTANCE = 32; // desired radial distance (reported as zoom)
-const CAMERA_HEIGHT = 7; // how high above target the camera sits
-// Compute Z so that sqrt(CAMERA_HEIGHT^2 + z^2) === INITIAL_CAMERA_DISTANCE, preserving displayed zoom value.
-const INITIAL_CAMERA_Z = Math.max(0, Math.sqrt(Math.max(0, INITIAL_CAMERA_DISTANCE * INITIAL_CAMERA_DISTANCE - CAMERA_HEIGHT * CAMERA_HEIGHT)));
 
 // Title scene camera/target (kept far away so both scenes render simultaneously)
 const TITLE_TARGET = new THREE.Vector3(0, 4, -100);
@@ -37,170 +31,8 @@ const TITLE_CAMERA_POS = new THREE.Vector3(0, 7, -92);
 
 // --- Helper component for camera reset animation ---
 const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3); // hoisted to avoid re-allocation each frame
-function CameraResetAnimator({ controlsRef, resetRef, onDone }) {
-  const { camera } = useThree();
-  useFrame((_, delta) => {
-    const data = resetRef.current;
-    if (!data) return;
-    data.elapsed += delta;
-    const t = Math.min(data.elapsed / data.duration, 1);
-    const k = easeOutCubic(t);
 
-    camera.position.lerpVectors(data.fromPos, data.toPos, k);
-    controlsRef.current.target.lerpVectors(data.fromTarget, data.toTarget, k);
-    controlsRef.current.update();
-
-    // Early finish tolerance: once we're past a minimum progress and within distance epsilon, snap & finish.
-    if (
-      t >= 1 ||
-      (t >= data.minProgressForEarlyEnd &&
-        camera.position.distanceToSquared(data.toPos) <= data.posEpsSq &&
-        controlsRef.current.target.distanceToSquared(data.toTarget) <= data.targetEpsSq)
-    ) {
-      // Snap to exact final values to avoid residual drift
-      camera.position.copy(data.toPos);
-      controlsRef.current.target.copy(data.toTarget);
-      controlsRef.current.update();
-      resetRef.current = null;
-      onDone();
-    }
-  });
-  return null;
-}
-
-// --- NavigationBar component (bottom buttons) ---
-function NavigationBar({
-  isLocked,
-  isResetting,
-  activeVaseIndex,
-  baseColor,
-  onPrev,
-  onNext,
-  onStartHoldPrev,
-  onStartHoldNext,
-  onStopHold,
-  onSetOverlayText,
-  onSet3DTitle,
-  onOpenColorPicker,
-  onResetCamera,
-  onManifest,
-  onDestroy,
-  onColorPicked,
-  colorInputRef,
-  barRef,
-}) {
-  return (
-    <div
-      ref={barRef}
-      style={{
-        width: "100%",
-        position: 'absolute',
-        bottom: 10,
-        left: '50%',
-        transform: 'translateX(-50%)',
-        zIndex: 12,
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        gap: 8,
-        background: 'transparent',
-        pointerEvents: 'auto',
-      }}
-    >
-      {/* Row 1: navigation + reset */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <UIButton
-          hoverScale={1}
-          tapScale={1}
-          onClick={onPrev}
-          onPointerDown={(e) => { e.preventDefault(); onStartHoldPrev(); }}
-          onPointerUp={onStopHold}
-          onPointerLeave={onStopHold}
-          onPointerCancel={onStopHold}
-          disabled={isLocked || isResetting}
-          style={{ width: 48 }}
-        >
-          <ArrowLeft size={20} strokeWidth={2} />
-        </UIButton>
-        <UIButton
-          hoverScale={1}
-          tapScale={1}
-          onClick={onNext}
-          onPointerDown={(e) => { e.preventDefault(); onStartHoldNext(); }}
-          onPointerUp={onStopHold}
-          onPointerLeave={onStopHold}
-          onPointerCancel={onStopHold}
-          disabled={isLocked || isResetting}
-          style={{ width: 48 }}
-        >
-          <ArrowRight size={20} strokeWidth={2} />
-        </UIButton>
-        <div style={{ width: 1, height: 28, background: 'rgba(0,0,0,0.12)', margin: '0 4px' }} />
-        <UIButton
-          animated
-          onClick={onResetCamera}
-          disabled={isLocked || isResetting}
-          style={{ fontSize: 14 }}
-        >
-          reset camera
-        </UIButton>
-      </div>
-
-      {/* Row 2: vase controls + actions */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
-        <UIButton
-          animated
-          onClick={onSetOverlayText}
-          disabled={isLocked || isResetting}
-          style={{ fontSize: 14 }}
-        >
-          vase text
-        </UIButton>
-        <UIButton
-          animated
-          onClick={onOpenColorPicker}
-          disabled={isLocked || isResetting}
-          style={{ fontSize: 14 }}
-        >
-          vase color
-        </UIButton>
-        <UIButton
-          animated
-          onClick={onSet3DTitle}
-          disabled={isLocked || isResetting}
-          style={{ fontSize: 14 }}
-        >
-          3d text
-        </UIButton>
-        <div style={{ width: 1, height: 28, background: 'rgba(0,0,0,0.12)', margin: '0 4px' }} />
-        <UIButton
-          animated
-          onClick={onManifest}
-          disabled={isLocked || isResetting}
-          style={{ fontSize: 14 }}
-        >
-          manifest
-        </UIButton>
-        <UIButton
-          animated
-          onClick={onDestroy}
-          disabled={isLocked || isResetting}
-          style={{ fontSize: 14 }}
-        >
-          destroy
-        </UIButton>
-      </div>
-      {/* Hidden color input */}
-      <input
-        ref={colorInputRef}
-        type="color"
-        defaultValue={baseColor || '#ffffff'}
-        onChange={onColorPicked}
-        style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 0, height: 0 }}
-      />
-    </div>
-  );
-}
+// NavigationBar extracted to component
 
 export default function App() {
   const isTest1 = typeof window !== 'undefined' && window.location.pathname === '/test-1';
@@ -211,19 +43,21 @@ export default function App() {
   const connectTimerRef = useRef(null);
   // Optional hook to run custom logic after a camera reset/transition completes
   const onResetDoneOnceRef = useRef(null);
-  // Per-vase texture source stacks & metadata
-  const [textureSourcesList, setTextureSourcesList] = useState(
-    () => Array.from({ length: VASE_COUNT }, () => ({ base: null, upload: null, camera: null, text: null }))
-  );
-  const [activeBaseLayers, setActiveBaseLayers] = useState(
-    () => Array.from({ length: VASE_COUNT }, () => 'base')
-  );
-  const [baseColors, setBaseColors] = useState(
-    () => Array.from({ length: VASE_COUNT }, () => '#ffffff')
-  );
-  const [titles3D, setTitles3D] = useState(
-    () => Array.from({ length: VASE_COUNT }, () => '')
-  );
+  // Per-vase design state via hook
+  const {
+    textureSourcesList,
+    activeBaseLayers,
+    baseColors,
+    titles3D,
+    setTextureSourcesForVase,
+    setActiveBaseLayerForVase,
+    setBaseColorForVase,
+    setTitle3DForVase,
+    setTextureSourcesList,
+    setActiveBaseLayers,
+    setBaseColors,
+    setTitles3D,
+  } = useVaseDesignState();
   // In-memory vases loaded from storage (no autosave yet)
   const [vases, setVases] = useState([]);
   const [activeAction, setActiveAction] = useState(null);
@@ -238,29 +72,11 @@ export default function App() {
   const sensorTimersRef = useRef({});
   // Track per-vase destroy in-progress to prevent duplicate triggers (e.g., React StrictMode double effects)
   const destroyingVasesRef = useRef(new Set());
-  // Coins per vase (simple: each coin has id, position [x,y,z], rotation [x,y,z])
-  const [coinsByVase, setCoinsByVase] = useState(() => Array.from({ length: VASE_COUNT }, () => []));
+  // Coins per vase via hook
+  const { coinsByVase, spawnCoinForVase, setCoinsByVase, clearCoinsForVase } = useCoinsByVase();
   // Stats modal state
   const [isStatsModalOpen, setIsStatsModalOpen] = useState(false);
-  // Simple per-vase coin spawner (like Test1)
-  const spawnCoinForVase = useCallback((vaseIndex) => {
-    setCoinsByVase(prev => {
-      const list = prev.map(arr => arr.slice());
-      const id = Date.now() + Math.random();
-      const position = [
-        (Math.random() - 0.5) * 0.6,
-        15,
-        (Math.random() - 0.5) * 0.6,
-      ];
-      const rotation = [
-        Math.random() * Math.PI,
-        Math.random() * Math.PI,
-        Math.random() * Math.PI,
-      ];
-      list[vaseIndex].push({ id, position, rotation });
-      return list;
-    });
-  }, []);
+  // spawnCoinForVase provided by useCoinsByVase
   // Debug: toggle Rapier collider wireframes
   const [debugPhysics, setDebugPhysics] = useState(false);
   // Mobile layout adjustment
@@ -270,6 +86,11 @@ export default function App() {
   // Interaction state
   const [draggingMode, setDraggingMode] = useState(null); // 'vase' | 'camera' | null
   const [isResetting, setIsResetting] = useState(false);
+  const [needsCameraReset, setNeedsCameraReset] = useState(false);
+
+  // Camera reset tolerances (squared distances)
+  const RESET_POS_EPS_SQ = 0.05 * 0.05;    // ~5 cm positional tolerance
+  const RESET_TARGET_EPS_SQ = 0.025 * 0.025; // tighter target tolerance
   // Zoom intent gating: allow zoom only when actively rotating (dragging camera) or while 'Z' is held
   const [zoomKeyDown, setZoomKeyDown] = useState(false);
   const containerRef = useRef(null);
@@ -292,17 +113,6 @@ export default function App() {
     }
   }, []);
 
-   // Focus camera on a given vase index (wrap-around) while preserving current distance & view direction
-  // Helper to compute vase target position from index (grid layout)
-  const getVaseTarget = useCallback((idx) => {
-    const col = idx % VASE_COLUMNS_COUNT;
-    const row = Math.floor(idx / VASE_COLUMNS_COUNT);
-    // Arrange vases downward along -Y (screen vertical) instead of pushing back on Z.
-    // Target's Y should remain VASE_TARGET_Y units above the vase group's base Y.
-    const baseY = -row * VASE_SPACING; // group Y position
-    const targetY = baseY + VASE_TARGET_Y;
-    return new THREE.Vector3(col * VASE_SPACING, targetY, 0);
-  }, []);
    
   const focusVase = useCallback((index) => {
     if (!controlsRef.current) return;
@@ -359,31 +169,13 @@ export default function App() {
       if (!mounted) return;
       setVases(vases);
       const mapped = mapVasesToUiState(vases);
+      // Initialize design state from storage mapping
       setTextureSourcesList(mapped.textureSourcesList);
       setActiveBaseLayers(mapped.activeBaseLayers);
       setBaseColors(mapped.baseColors);
       setTitles3D(mapped.titles3D);
     })();
     return () => { mounted = false; };
-  }, []);
-
-  // Human-friendly "time ago" formatter for createdAt
-  const formatTimeAgo = useCallback((iso) => {
-    if (!iso) return '';
-    const then = new Date(iso).getTime();
-    const now = Date.now();
-    const s = Math.max(0, Math.floor((now - then) / 1000));
-    if (s < 45) return 'just now';
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m} min${m === 1 ? '' : 's'}`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h} hour${h === 1 ? '' : 's'}`;
-    const d = Math.floor(h / 24);
-    if (d < 30) return `${d} day${d === 1 ? '' : 's'}`;
-    const mo = Math.floor(d / 30);
-    if (mo < 12) return `${mo} month${mo === 1 ? '' : 's'}`;
-    const y = Math.floor(mo / 12);
-    return `${y} year${y === 1 ? '' : 's'}`;
   }, []);
 
   // One-time title size to fit viewport (non-reactive)
@@ -476,18 +268,7 @@ export default function App() {
   }, [appMode, focusVase, activeVaseIndex, isLocked, spawnCoinForVase]);
 
   // Helpers to update per-vase structures
-  const setTextureSourcesForVase = useCallback((index, updater) => {
-    setTextureSourcesList(prev => prev.map((entry, i) => i === index ? updater(entry) : entry));
-  }, []);
-  const setActiveBaseLayerForVase = useCallback((index, layer) => {
-    setActiveBaseLayers(prev => prev.map((l, i) => i === index ? layer : l));
-  }, []);
-  const setBaseColorForVase = useCallback((index, color) => {
-    setBaseColors(prev => prev.map((c, i) => i === index ? color : c));
-  }, []);
-  const setTitle3DForVase = useCallback((index, title) => {
-    setTitles3D(prev => prev.map((t, i) => i === index ? title : t));
-  }, []);
+  // setter helpers provided by useVaseDesignState
 
   // Compose textures for each vase (could optimize with memoization; fine for small counts)
   const composedTextures = textureSourcesList.map((srcs, i) => {
@@ -526,11 +307,29 @@ export default function App() {
       scheduled = true;
       requestAnimationFrame(() => {
         scheduled = false;
-        const distance = controlsRef.current.getDistance();
+
+        const controls = controlsRef.current;
+        const cam = controls.object;
+        const distance = controls.getDistance();
         setCurrentZoom(distance);
+
+        // Desired pose = default target + default direction * current distance
+        const desiredPos = defaultTarget.current
+          .clone()
+          .add(defaultDir.current.clone().multiplyScalar(distance));
+
+        const posDiffSq = cam.position.distanceToSquared(desiredPos);
+        const targetDiffSq = controls.target.distanceToSquared(defaultTarget.current);
+
+        // Show the button only if we exceed tolerances and we're actually in the vases mode
+        const shouldShow =
+          appMode === 'vases' &&
+          (posDiffSq > RESET_POS_EPS_SQ || targetDiffSq > RESET_TARGET_EPS_SQ);
+
+        setNeedsCameraReset(shouldShow);
       });
     };
-  }, []);
+  }, [appMode]);
 
   // Preload model (side-effect belongs in useEffect, not useMemo)
   useEffect(() => {
@@ -612,8 +411,8 @@ export default function App() {
     const up = () => {
       if (isLocked || appMode !== 'vases') return;
       if (draggingMode === "camera") {
-        // Start reset back to default orientation (keep distance)
-        startCameraReset();
+        // Camera was moved; let the tolerance logic decide visibility
+        setDraggingMode(null);
       } else if (draggingMode === "vase") {
         setDraggingMode(null);
       }
@@ -663,8 +462,8 @@ export default function App() {
   // missing the initial pointerdown event when we previously relied on props.
   useEffect(() => {
     if (!controlsRef.current) return;
-    // Allow camera interaction only in vases mode and when not locked/resetting.
-    const baseAllow = appMode === 'vases' && !isResetting && !isLocked;
+    // Allow camera interaction whenever not locked/resetting (both title and vases screens).
+    const baseAllow = !isResetting && !isLocked;
 
     // Keep OrbitControls ready to accept a drag at pointerdown time. Disable entirely only while dragging the vase.
     controlsRef.current.enabled = baseAllow && draggingMode !== 'vase';
@@ -684,7 +483,7 @@ export default function App() {
     if (!el) return;
     const onWheel = (e) => {
       // If the wheel event occurs over our canvas container and zoom is not explicitly allowed, prevent it.
-      const baseAllow = appMode === 'vases' && !isResetting && !isLocked;
+      const baseAllow = !isResetting && !isLocked;
       const allowZoom = baseAllow && (draggingMode !== 'vase' || zoomKeyDown);
       if (!allowZoom && el.contains(e.target)) {
         // e.preventDefault(); // disabled because it's too disruptive on desktop
@@ -722,48 +521,6 @@ export default function App() {
 
   // Quick actions: overlay text, 3D title, base color
   const colorInputRef = useRef(null);
-
-  const createSolidColorCanvas = useCallback((hex, size = 1024) => {
-    if (typeof document === 'undefined') return null;
-    const c = document.createElement('canvas');
-    c.width = c.height = size;
-    const ctx = c.getContext('2d');
-    ctx.fillStyle = hex || '#ffffff';
-    ctx.fillRect(0, 0, size, size);
-    return c;
-  }, []);
-
-  const createTextOverlayCanvas = useCallback((text, size = 1024) => {
-    if (typeof document === 'undefined') return null;
-    const c = document.createElement('canvas');
-    c.width = c.height = size;
-    const ctx = c.getContext('2d');
-    ctx.clearRect(0, 0, size, size);
-    const pad = size * 0.08;
-    const maxTextWidth = size - pad * 2;
-    let fontSize = Math.floor(size * 0.12);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#111';
-    ctx.strokeStyle = 'rgba(255,255,255,0.65)';
-    ctx.lineWidth = Math.max(2, Math.floor(size * 0.008));
-    // Reduce until it fits
-    do {
-      ctx.font = `700 ${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif`;
-      if (ctx.measureText(text).width <= maxTextWidth) break;
-      fontSize -= 2;
-    } while (fontSize > 12);
-    const cx = size / 2;
-    const cy = size / 2;
-    // Mirror horizontally to counter the vase UV mirroring so it appears correct in 3D
-    ctx.save();
-    ctx.translate(size, 0);
-    ctx.scale(-1, 1);
-    ctx.strokeText(text, cx, cy);
-    ctx.fillText(text, cx, cy);
-    ctx.restore();
-    return c;
-  }, []);
 
   const handleSetOverlayText = useCallback(() => {
     if (appMode !== 'vases' || isLocked || isResetting) return;
@@ -1206,6 +963,7 @@ export default function App() {
             minDistance={3}
             maxDistance={42}
             onChange={handleControlsChange}
+            onStart={() => setDraggingMode('camera')}
             target={appMode === 'title' ? [TITLE_TARGET.x, TITLE_TARGET.y, TITLE_TARGET.z] : [defaultTarget.current.x, defaultTarget.current.y, defaultTarget.current.z]}
           />
 
@@ -1215,6 +973,7 @@ export default function App() {
             onDone={() => {
               setIsResetting(false);
               setDraggingMode(null);
+              setNeedsCameraReset(false);
               if (onResetDoneOnceRef.current) {
                 const fn = onResetDoneOnceRef.current;
                 onResetDoneOnceRef.current = null;
@@ -1224,6 +983,26 @@ export default function App() {
           />
         </Canvas>
       </div>
+      {appMode === 'vases' && needsCameraReset && !isResetting && !isLocked && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 8,
+            right: 8,
+            zIndex: 12,
+            pointerEvents: 'auto',
+          }}
+        >
+          <UIButton
+            animated
+            onClick={handleResetCamera}
+            disabled={isLocked || isResetting}
+            style={{ fontSize: 14 }}
+          >
+            reset camera
+          </UIButton>
+        </div>
+      )}
       {/* Title screen overlay UI */}
       {appMode === 'title' && (
         <div
