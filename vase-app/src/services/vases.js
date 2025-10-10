@@ -1,5 +1,5 @@
 import { vaseStore } from '../storage/index.js';
-import { createVase } from '../models/vase.js';
+import { createVase, updateVase } from '../models/vase.js';
 
 const VASE_COUNT = 9;
 
@@ -13,7 +13,12 @@ export async function loadOrInitVases() {
   try {
     const existing = await vaseStore.getItem('all');
     if (Array.isArray(existing) && existing.length) {
-      return existing;
+      // lightweight migration: ensure name exists
+      const migrated = existing.map(v => ({ name: '', ...v }));
+      if (migrated.some((v, i) => v.name !== existing[i].name)) {
+        try { await vaseStore.setItem('all', migrated); } catch {}
+      }
+      return migrated;
     }
   } catch (e) {
     // If read fails, fall through to init defaults
@@ -48,4 +53,20 @@ export function mapVasesToUiState(vases) {
   const baseColors = vases.map(v => v.appearance.baseColor);
   const titles3D = vases.map(v => v.labels.vaseText || '');
   return { textureSourcesList, activeBaseLayers, baseColors, titles3D };
+}
+
+/** Persist entire vases array */
+export async function saveVases(vases) {
+  try {
+    await vaseStore.setItem('all', vases);
+  } catch (e) {
+    console.warn('[vases] failed saving to storage', e);
+  }
+}
+
+/** Update one vase by index and persist; returns updated array */
+export async function updateVaseAt(vases, index, patch) {
+  const next = vases.map((v, i) => (i === index ? updateVase(v, patch) : v));
+  await saveVases(next);
+  return next;
 }

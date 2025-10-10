@@ -15,6 +15,7 @@
 /**
  * @typedef {Object} Vase
  * @property {string} id                  // stable uid, e.g. "vase-0001"
+ * @property {string} [name]              // human-friendly name (optional)
  * @property {1} version                  // schema version for migrations
  * @property {string} createdAt           // ISO date
  * @property {string} updatedAt           // ISO date
@@ -41,6 +42,7 @@ export function createVase(init) {
   const now = new Date().toISOString();
   return {
     id: init.id,
+    name: init.name ?? '',
     version: 1,
     createdAt: init.createdAt ?? now,
     updatedAt: init.updatedAt ?? now,

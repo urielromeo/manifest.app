@@ -10,7 +10,9 @@ import Sidebars from './components/Sidebars.jsx';
 import useComposedTexture from './hooks/useComposedTexture.js';
 import Coin from './components/Coin.jsx';
 import Test1Page from './components/Test1.jsx';
-import { loadOrInitVases, mapVasesToUiState } from './services/vases.js';
+import { loadOrInitVases, mapVasesToUiState, updateVaseAt } from './services/vases.js';
+import UIButton from './components/ui/UIButton.jsx';
+import { ArrowLeft, ArrowRight } from 'lucide-react';
 
 export const VaseShatterContext = React.createContext({ phase: 'idle', center: [0,0,0], trigger: 0 });
 
@@ -19,7 +21,7 @@ const BOUNDS_MARGIN = 2.15; // (kept for potential future use)
 // Multi-vase configuration
 const VASE_COUNT = 9; // Adjust this number to render more or fewer vases
 const VASE_COLUMNS_COUNT = 3; // Number of columns before wrapping to a new row
-const VASE_SPACING = 20; // Horizontal (X) and vertical (Y) spacing between vases in the grid
+const VASE_SPACING = 25; // Horizontal (X) and vertical (Y) spacing between vases in the grid
 
 // Camera / focus tuning
 // Keep target at vase base (y=0), but raise the camera itself.
@@ -66,6 +68,140 @@ function CameraResetAnimator({ controlsRef, resetRef, onDone }) {
   return null;
 }
 
+// --- NavigationBar component (bottom buttons) ---
+function NavigationBar({
+  isLocked,
+  isResetting,
+  activeVaseIndex,
+  baseColor,
+  onPrev,
+  onNext,
+  onStartHoldPrev,
+  onStartHoldNext,
+  onStopHold,
+  onSetOverlayText,
+  onSet3DTitle,
+  onOpenColorPicker,
+  onResetCamera,
+  onManifest,
+  onDestroy,
+  onColorPicked,
+  colorInputRef,
+  barRef,
+}) {
+  return (
+    <div
+      ref={barRef}
+      style={{
+        width: "100%",
+        position: 'absolute',
+        bottom: 10,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 12,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 8,
+        background: 'transparent',
+        pointerEvents: 'auto',
+      }}
+    >
+      {/* Row 1: navigation + reset */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <UIButton
+          hoverScale={1}
+          tapScale={1}
+          onClick={onPrev}
+          onPointerDown={(e) => { e.preventDefault(); onStartHoldPrev(); }}
+          onPointerUp={onStopHold}
+          onPointerLeave={onStopHold}
+          onPointerCancel={onStopHold}
+          disabled={isLocked || isResetting}
+          style={{ width: 48 }}
+        >
+          <ArrowLeft size={20} strokeWidth={2} />
+        </UIButton>
+        <UIButton
+          hoverScale={1}
+          tapScale={1}
+          onClick={onNext}
+          onPointerDown={(e) => { e.preventDefault(); onStartHoldNext(); }}
+          onPointerUp={onStopHold}
+          onPointerLeave={onStopHold}
+          onPointerCancel={onStopHold}
+          disabled={isLocked || isResetting}
+          style={{ width: 48 }}
+        >
+          <ArrowRight size={20} strokeWidth={2} />
+        </UIButton>
+        <div style={{ width: 1, height: 28, background: 'rgba(0,0,0,0.12)', margin: '0 4px' }} />
+        <UIButton
+          animated
+          onClick={onResetCamera}
+          disabled={isLocked || isResetting}
+          style={{ fontSize: 14 }}
+        >
+          reset camera
+        </UIButton>
+      </div>
+
+      {/* Row 2: vase controls + actions */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
+        <UIButton
+          animated
+          onClick={onSetOverlayText}
+          disabled={isLocked || isResetting}
+          style={{ fontSize: 14 }}
+        >
+          vase text
+        </UIButton>
+        <UIButton
+          animated
+          onClick={onOpenColorPicker}
+          disabled={isLocked || isResetting}
+          style={{ fontSize: 14 }}
+        >
+          vase color
+        </UIButton>
+        <UIButton
+          animated
+          onClick={onSet3DTitle}
+          disabled={isLocked || isResetting}
+          style={{ fontSize: 14 }}
+        >
+          3d text
+        </UIButton>
+        <div style={{ width: 1, height: 28, background: 'rgba(0,0,0,0.12)', margin: '0 4px' }} />
+        <UIButton
+          animated
+          onClick={onManifest}
+          disabled={isLocked || isResetting}
+          style={{ fontSize: 14 }}
+        >
+          manifest
+        </UIButton>
+        <UIButton
+          animated
+          onClick={onDestroy}
+          disabled={isLocked || isResetting}
+          style={{ fontSize: 14 }}
+        >
+          destroy
+        </UIButton>
+      </div>
+      {/* Hidden color input */}
+      <input
+        ref={colorInputRef}
+        type="color"
+        defaultValue={baseColor || '#ffffff'}
+        onChange={onColorPicked}
+        style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 0, height: 0 }}
+      />
+    </div>
+  );
+}
+
 export default function App() {
   const isTest1 = typeof window !== 'undefined' && window.location.pathname === '/test-1';
   if (isTest1) return <Test1Page />;
@@ -104,6 +240,8 @@ export default function App() {
   const destroyingVasesRef = useRef(new Set());
   // Coins per vase (simple: each coin has id, position [x,y,z], rotation [x,y,z])
   const [coinsByVase, setCoinsByVase] = useState(() => Array.from({ length: VASE_COUNT }, () => []));
+  // Stats modal state
+  const [isStatsModalOpen, setIsStatsModalOpen] = useState(false);
   // Simple per-vase coin spawner (like Test1)
   const spawnCoinForVase = useCallback((vaseIndex) => {
     setCoinsByVase(prev => {
@@ -132,6 +270,9 @@ export default function App() {
   // Interaction state
   const [draggingMode, setDraggingMode] = useState(null); // 'vase' | 'camera' | null
   const [isResetting, setIsResetting] = useState(false);
+  // Zoom intent gating: allow zoom only when actively rotating (dragging camera) or while 'Z' is held
+  const [zoomKeyDown, setZoomKeyDown] = useState(false);
+  const containerRef = useRef(null);
 
   const controlsRef = useRef(null);
   // Hold-to-repeat navigation support
@@ -465,12 +606,6 @@ export default function App() {
     };
   }, []);
 
-  // Pointer logic
-  const handleCanvasPointerDown = useCallback(() => {
-    // If we're not currently dragging the vase and not resetting, enter camera mode
-    if (isLocked || appMode !== 'vases') return;
-    if (draggingMode === null && !isResetting) setDraggingMode("camera");
-  }, [draggingMode, isResetting, isLocked, appMode]);
 
   // Global pointerup to finalize drags
   useEffect(() => {
@@ -514,16 +649,51 @@ export default function App() {
     };
   }, [draggingMode, startCameraReset, isLocked, appMode]);
 
+  // Hold 'Z' to allow zoom even when not dragging
+  useEffect(() => {
+    const onDown = (e) => { if (e.key === 'z' || e.key === 'Z') setZoomKeyDown(true); };
+    const onUp = (e) => { if (e.key === 'z' || e.key === 'Z') setZoomKeyDown(false); };
+    window.addEventListener('keydown', onDown);
+    window.addEventListener('keyup', onUp);
+    return () => { window.removeEventListener('keydown', onDown); window.removeEventListener('keyup', onUp); };
+  }, []);
+
   // Keep OrbitControls mounted & active so first pointer move rotates immediately.
   // We dynamically enable/disable rotate & pan based on draggingMode to avoid
   // missing the initial pointerdown event when we previously relied on props.
   useEffect(() => {
     if (!controlsRef.current) return;
-    const allowCamera = appMode === 'vases' && draggingMode !== "vase" && !isResetting && !isLocked;
-    controlsRef.current.enableRotate = allowCamera;
-    controlsRef.current.enablePan = allowCamera;
-    controlsRef.current.enableZoom = allowCamera;
-  }, [draggingMode, isResetting, isLocked, appMode]);
+    // Allow camera interaction only in vases mode and when not locked/resetting.
+    const baseAllow = appMode === 'vases' && !isResetting && !isLocked;
+
+    // Keep OrbitControls ready to accept a drag at pointerdown time. Disable entirely only while dragging the vase.
+    controlsRef.current.enabled = baseAllow && draggingMode !== 'vase';
+
+    // Leave rotate/pan always true so the pointerdown can initiate a drag.
+    controlsRef.current.enableRotate = true;
+    controlsRef.current.enablePan = true;
+
+    // Zoom intent: allow when not dragging a vase (background/camera), or when 'Z' is held.
+    const allowZoom = baseAllow && (draggingMode !== 'vase' || zoomKeyDown);
+    controlsRef.current.enableZoom = allowZoom;
+  }, [draggingMode, isResetting, isLocked, appMode, zoomKeyDown]);
+
+  // Wheel-guard to block accidental zoom when zoom is not explicitly allowed
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      // If the wheel event occurs over our canvas container and zoom is not explicitly allowed, prevent it.
+      const baseAllow = appMode === 'vases' && !isResetting && !isLocked;
+      const allowZoom = baseAllow && (draggingMode !== 'vase' || zoomKeyDown);
+      if (!allowZoom && el.contains(e.target)) {
+        // e.preventDefault(); // disabled because it's too disruptive on desktop
+      }
+    };
+    // Use capture phase and non-passive to be able to preventDefault
+    el.addEventListener('wheel', onWheel, { passive: false, capture: true });
+    return () => el.removeEventListener('wheel', onWheel, { capture: true });
+  }, [appMode, isResetting, isLocked, draggingMode, zoomKeyDown]);
 
   // Prevent keyboard vase switching when locked
   useEffect(() => {
@@ -550,8 +720,168 @@ export default function App() {
   //   return () => window.removeEventListener('keydown', onKey);
   // }, []);
 
+  // Quick actions: overlay text, 3D title, base color
+  const colorInputRef = useRef(null);
+
+  const createSolidColorCanvas = useCallback((hex, size = 1024) => {
+    if (typeof document === 'undefined') return null;
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = hex || '#ffffff';
+    ctx.fillRect(0, 0, size, size);
+    return c;
+  }, []);
+
+  const createTextOverlayCanvas = useCallback((text, size = 1024) => {
+    if (typeof document === 'undefined') return null;
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, size, size);
+    const pad = size * 0.08;
+    const maxTextWidth = size - pad * 2;
+    let fontSize = Math.floor(size * 0.12);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#111';
+    ctx.strokeStyle = 'rgba(255,255,255,0.65)';
+    ctx.lineWidth = Math.max(2, Math.floor(size * 0.008));
+    // Reduce until it fits
+    do {
+      ctx.font = `700 ${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif`;
+      if (ctx.measureText(text).width <= maxTextWidth) break;
+      fontSize -= 2;
+    } while (fontSize > 12);
+    const cx = size / 2;
+    const cy = size / 2;
+    // Mirror horizontally to counter the vase UV mirroring so it appears correct in 3D
+    ctx.save();
+    ctx.translate(size, 0);
+    ctx.scale(-1, 1);
+    ctx.strokeText(text, cx, cy);
+    ctx.fillText(text, cx, cy);
+    ctx.restore();
+    return c;
+  }, []);
+
+  const handleSetOverlayText = useCallback(() => {
+    if (appMode !== 'vases' || isLocked || isResetting) return;
+    const input = window.prompt('Enter overlay text for this vase (leave empty to clear):', '');
+    if (input === null) return; // canceled
+    const s = input.trim();
+    if (!s) {
+      setTextureSourcesForVase(activeVaseIndex, (prev) => ({ ...prev, text: null }));
+      return;
+    }
+    const canvas = createTextOverlayCanvas(s, 1024);
+    if (canvas) setTextureSourcesForVase(activeVaseIndex, (prev) => ({ ...prev, text: canvas }));
+  }, [appMode, isLocked, isResetting, activeVaseIndex, setTextureSourcesForVase, createTextOverlayCanvas]);
+
+  const handleSet3DTitle = useCallback(() => {
+    if (appMode !== 'vases' || isLocked || isResetting) return;
+    const current = titles3D[activeVaseIndex] || '';
+    const input = window.prompt('Enter 3D title text (leave empty to clear):', current);
+    if (input === null) return; // canceled
+    const s = input.trim();
+    setTitle3DForVase(activeVaseIndex, s);
+  }, [appMode, isLocked, isResetting, activeVaseIndex, titles3D, setTitle3DForVase]);
+
+  const handleOpenColorPicker = useCallback(() => {
+    if (appMode !== 'vases' || isLocked || isResetting) return;
+    colorInputRef.current?.click();
+  }, [appMode, isLocked, isResetting]);
+
+  const handleColorPicked = useCallback((e) => {
+    const val = e?.target?.value;
+    if (!val) return;
+    const idx = activeVaseIndex;
+    setBaseColorForVase(idx, val);
+    // Also set the vase base texture to this solid color and select 'base' layer
+    const canvas = createSolidColorCanvas(val, 1024);
+    if (canvas) setTextureSourcesForVase(idx, (prev) => ({ ...prev, base: canvas }));
+    setActiveBaseLayerForVase(idx, 'base');
+  }, [activeVaseIndex, setBaseColorForVase, setTextureSourcesForVase, setActiveBaseLayerForVase, createSolidColorCanvas]);
+
+  // Stats modal callbacks
+  const handleOpenStatsModal = useCallback(() => {
+    if (appMode !== 'vases' || isLocked || isResetting) return;
+    setIsStatsModalOpen(true);
+  }, [appMode, isLocked, isResetting]);
+
+  const handleCloseStatsModal = useCallback(() => {
+    setIsStatsModalOpen(false);
+  }, []);
+
+  const handleResetVase = useCallback(async () => {
+    if (appMode !== 'vases') return;
+    const ok = window.confirm("are you sure? you'll lose all progress on this vase");
+    if (!ok) return;
+    const idx = activeVaseIndex;
+    try {
+      // Reset DB fields for this vase
+      const updated = await updateVaseAt(vases, idx, {
+        name: '',
+        stats: { destroyCount: 0, coinAmount: 0 },
+        // Also reset creation time so it appears as newly created
+        createdAt: new Date().toISOString(),
+      });
+      setVases(updated);
+      // Reset local UI state for this vase
+      setTitles3D(prev => prev.map((t, i) => (i === idx ? '' : t)));
+      setBaseColors(prev => prev.map((c, i) => (i === idx ? '#ffffff' : c)));
+      const white = createSolidColorCanvas('#ffffff', 1024);
+      if (white) setTextureSourcesForVase(idx, (prev) => ({ ...prev, base: white, upload: null, camera: null, text: null }));
+      setActiveBaseLayerForVase(idx, 'base');
+      setCoinsByVase(prev => prev.map((arr, i) => (i === idx ? [] : arr)));
+    } finally {
+      setIsStatsModalOpen(false);
+    }
+  }, [appMode, activeVaseIndex, vases, setTextureSourcesForVase, setActiveBaseLayerForVase, setBaseColors, setTitles3D, setCoinsByVase, createSolidColorCanvas]);
+
+  // New quick action handlers
+  const handleResetCamera = useCallback(() => {
+    if (appMode !== 'vases' || isLocked || isResetting) return;
+    startCameraReset();
+  }, [appMode, isLocked, isResetting, startCameraReset]);
+
+  const handleTriggerManifest = useCallback(() => {
+    if (appMode !== 'vases' || isLocked || isResetting) return;
+    setActiveAction('manifest');
+    const idx = activeVaseIndex;
+    // Optimistically update local state using functional setState to avoid stale reads on rapid clicks
+    setVases((prev) => {
+      const next = prev.map((v, i) => {
+        if (i !== idx) return v;
+        const currentCount = v?.stats?.coinAmount ?? 0;
+        return {
+          ...v,
+          stats: {
+            ...v.stats,
+            coinAmount: currentCount + 1,
+          },
+        };
+      });
+      // Persist in the background using the freshly computed state
+      (async () => {
+        try {
+          const newCount = next[idx]?.stats?.coinAmount ?? 0;
+          await updateVaseAt(next, idx, { stats: { coinAmount: newCount } });
+        } catch (e) {
+          console.error('Failed to persist coinAmount:', e);
+        }
+      })();
+      return next;
+    });
+  }, [appMode, isLocked, isResetting, activeVaseIndex]);
+
+  const handleTriggerDestroy = useCallback(() => {
+    if (appMode !== 'vases' || isLocked || isResetting) return;
+    setActiveAction('destroy');
+  }, [appMode, isLocked, isResetting]);
+
   return (
-    <div style={{ width: "100vw", height: "100svh", overflow: "hidden" }}>
+    <div ref={containerRef} style={{ width: "100vw", height: "100svh", overflow: "hidden" }}>
       {/* Top-center info bar showing creation time for the active vase (vases mode only) */}
       {appMode === 'vases' && vases[activeVaseIndex] && (
         <div
@@ -567,11 +897,109 @@ export default function App() {
             borderRadius: 6,
             fontSize: 12,
             fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif',
-            pointerEvents: 'none',
-            whiteSpace: 'nowrap',
+            pointerEvents: 'auto',
+            textAlign: 'center',
           }}
         >
-          created {formatTimeAgo(vases[activeVaseIndex]?.createdAt)} ago
+          {/* Row 1: vase name or placeholder; click to set */}
+          <div
+            onClick={async (e) => {
+              e.stopPropagation();
+              if (isLocked || isResetting) return;
+              const current = vases[activeVaseIndex]?.name || '';
+              const next = window.prompt('Enter a name for this vase (leave empty to clear):', current);
+              if (next === null) return; // canceled
+              const name = next.trim();
+              // Update local vases state and persist
+              const updated = await updateVaseAt(vases, activeVaseIndex, { name });
+              setVases(updated);
+            }}
+            style={{
+              cursor: (isLocked || isResetting) ? 'default' : 'pointer',
+              fontWeight: 600,
+              marginBottom: 2,
+              whiteSpace: 'nowrap',
+            }}
+            title="Click to name this vase"
+          >
+            {vases[activeVaseIndex]?.name?.trim() ? vases[activeVaseIndex].name : 'this vase has no name'}
+          </div>
+          {/* Rows 2 & 3: created + stats (clickable to open modal) */}
+          <div
+            onClick={(e) => { e.stopPropagation(); if (!isLocked && !isResetting) handleOpenStatsModal(); }}
+            style={{ marginTop: 2, cursor: (isLocked || isResetting) ? 'default' : 'pointer' }}
+            title="Click for details"
+          >
+            <div style={{ opacity: 0.9, whiteSpace: 'nowrap' }}>
+              created {formatTimeAgo(vases[activeVaseIndex]?.createdAt)} ago
+            </div>
+            <div style={{ marginTop: 2 }}>
+              <div style={{ opacity: 0.9, whiteSpace: 'nowrap' }}>
+                {(() => {
+                  const n = vases[activeVaseIndex]?.stats?.destroyCount ?? 0;
+                  return n > 0 ? `${n} time${n === 1 ? '' : 's'} destroyed` : 'never destroyed';
+                })()}
+              </div>
+              <div style={{ opacity: 0.9, whiteSpace: 'nowrap' }}>
+                {(() => {
+                  const m = vases[activeVaseIndex]?.stats?.coinAmount ?? 0;
+                  return m > 0 ? `${m} time${m === 1 ? '' : 's'} manifested` : 'never manifested';
+                })()}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {isStatsModalOpen && (
+        <div
+          onClick={handleCloseStatsModal}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: 'rgba(0,0,0,0.45)',
+            zIndex: 1100,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            pointerEvents: 'auto',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 'min(92vw, 420px)',
+              background: '#fff',
+              color: '#111',
+              borderRadius: 12,
+              boxShadow: '0 12px 32px rgba(0,0,0,0.25)',
+              padding: 16,
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 6 }}>
+              {vases[activeVaseIndex]?.name?.trim() ? vases[activeVaseIndex].name : 'this vase has no name'}
+            </div>
+            <div style={{ opacity: 0.9, whiteSpace: 'nowrap' }}>
+              created {formatTimeAgo(vases[activeVaseIndex]?.createdAt)} ago
+            </div>
+            <div style={{ marginTop: 6 }}>
+              <div style={{ opacity: 0.9, whiteSpace: 'nowrap' }}>
+                {(() => {
+                  const n = vases[activeVaseIndex]?.stats?.destroyCount ?? 0;
+                  return n > 0 ? `${n} time${n === 1 ? '' : 's'} destroyed` : 'never destroyed';
+                })()}
+              </div>
+              <div style={{ opacity: 0.9, whiteSpace: 'nowrap' }}>
+                {(() => {
+                  const m = vases[activeVaseIndex]?.stats?.coinAmount ?? 0;
+                  return m > 0 ? `${m} time${m === 1 ? '' : 's'} manifested` : 'never manifested';
+                })()}
+              </div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
+              <UIButton onClick={handleCloseStatsModal} style={{ fontSize: 14 }}>close</UIButton>
+              <UIButton animated onClick={handleResetVase} style={{ fontSize: 14, background: '#ffe9e9', borderColor: '#e55' }}>reset vase</UIButton>
+            </div>
+          </div>
         </div>
       )}
       {false && appMode === 'vases' && (
@@ -589,63 +1017,27 @@ export default function App() {
         />
       )}
 
-      {/* Simple navigation UI for vase mode: transparent container with two buttons */}
       {appMode === 'vases' && (
-        <div
-          style={{
-            position: 'absolute',
-            bottom: 16,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: 12,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 12,
-            background: 'transparent',
-            pointerEvents: 'auto',
-          }}
-        >
-          <button
-            onClick={() => focusVase(activeVaseIndex - 1)}
-            onPointerDown={(e) => { e.preventDefault(); startHoldNav(-1); }}
-            onPointerUp={stopHoldNav}
-            onPointerLeave={stopHoldNav}
-            onPointerCancel={stopHoldNav}
-            disabled={isLocked || isResetting}
-            style={{
-              padding: '10px 14px',
-              fontSize: 16,
-              borderRadius: 8,
-              border: '1px solid #000',
-              background: '#fff',
-              color: '#000',
-              cursor: 'pointer',
-              width: 48,
-            }}
-          >
-            &lt;-
-          </button>
-          <button
-            onClick={() => focusVase(activeVaseIndex + 1)}
-            onPointerDown={(e) => { e.preventDefault(); startHoldNav(1); }}
-            onPointerUp={stopHoldNav}
-            onPointerLeave={stopHoldNav}
-            onPointerCancel={stopHoldNav}
-            disabled={isLocked || isResetting}
-            style={{
-              padding: '10px 14px',
-              fontSize: 16,
-              borderRadius: 8,
-              border: '1px solid #000',
-              background: '#fff',
-              color: '#000',
-              cursor: 'pointer',
-              width: 48,
-            }}
-          >
-            -&gt;
-          </button>
-        </div>
+        <NavigationBar
+          isLocked={isLocked}
+          isResetting={isResetting}
+          activeVaseIndex={activeVaseIndex}
+          baseColor={baseColors[activeVaseIndex]}
+          onPrev={() => focusVase(activeVaseIndex - 1)}
+          onNext={() => focusVase(activeVaseIndex + 1)}
+          onStartHoldPrev={() => startHoldNav(-1)}
+          onStartHoldNext={() => startHoldNav(1)}
+          onStopHold={stopHoldNav}
+          onSetOverlayText={handleSetOverlayText}
+          onSet3DTitle={handleSet3DTitle}
+          onOpenColorPicker={handleOpenColorPicker}
+          onResetCamera={handleResetCamera}
+          onManifest={handleTriggerManifest}
+          onDestroy={handleTriggerDestroy}
+          onColorPicked={handleColorPicked}
+          colorInputRef={colorInputRef}
+          barRef={bottomBarRef}
+        />
       )}
 
       {/* Debug Stats */}
@@ -687,7 +1079,6 @@ export default function App() {
       >
         <Canvas
           camera={{ position: appMode === 'title' ? [TITLE_CAMERA_POS.x, TITLE_CAMERA_POS.y, TITLE_CAMERA_POS.z] : [0, CAMERA_HEIGHT, INITIAL_CAMERA_Z], fov: 50 }}
-          onPointerDown={handleCanvasPointerDown}
         >
         <ambientLight intensity={0.6} />
         <directionalLight position={[2, 4, 2]} intensity={1} />
@@ -738,6 +1129,29 @@ export default function App() {
                           setCoinsByVase(prev => prev.map((arr, idx) => (idx === i ? [] : arr)));
                           // Allow this vase to be destroyed again in the future
                           destroyingVasesRef.current.delete(i);
+                          // Increment destroyed count and persist
+                          setVases((prev) => {
+                            const next = prev.map((v, idx2) => {
+                              if (idx2 !== i) return v;
+                              const current = v?.stats?.destroyCount ?? 0;
+                              return {
+                                ...v,
+                                stats: {
+                                  ...v.stats,
+                                  destroyCount: current + 1,
+                                },
+                              };
+                            });
+                            (async () => {
+                              try {
+                                const newCount = next[i]?.stats?.destroyCount ?? 0;
+                                await updateVaseAt(next, i, { stats: { destroyCount: newCount } });
+                              } catch (e) {
+                                console.error('Failed to persist destroyCount:', e);
+                              }
+                            })();
+                            return next;
+                          });
                         }
                       }}
                     />
@@ -790,7 +1204,7 @@ export default function App() {
             enablePan
             enableZoom={true}
             minDistance={3}
-            maxDistance={32}
+            maxDistance={42}
             onChange={handleControlsChange}
             target={appMode === 'title' ? [TITLE_TARGET.x, TITLE_TARGET.y, TITLE_TARGET.z] : [defaultTarget.current.x, defaultTarget.current.y, defaultTarget.current.z]}
           />
