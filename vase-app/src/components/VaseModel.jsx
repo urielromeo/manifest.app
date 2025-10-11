@@ -84,6 +84,9 @@ function useCenterForSpin(object3D) {
  */
 export default function VaseModel({
   texture,
+  // Glassy material toggle for intact vase and shards
+  glass = false,
+  glassProps = {},
   rotateWithPointer = true,
   onVasePointerDown,
   inertialRotation = true, // enable simple momentum effect
@@ -181,8 +184,41 @@ export default function VaseModel({
       if (!root) return;
       root.traverse((obj) => {
         if (obj.isMesh && obj.material && obj.material.isMaterial) {
-          if (texture) {
-            obj.material.map = texture;
+          // Apply base map when provided
+          if (texture) obj.material.map = texture;
+          // Toggle glassiness by swapping to MeshPhysicalMaterial with transmission
+          if (glass) {
+            if (!(obj.material instanceof THREE.MeshPhysicalMaterial)) {
+              const next = new THREE.MeshPhysicalMaterial();
+              // Try to keep roughness/metalness/color from existing material
+              next.color.copy(obj.material.color || new THREE.Color('#ffffff'));
+              next.roughness = obj.material.roughness ?? 0.1;
+              next.metalness = obj.material.metalness ?? 0.0;
+              obj.material.dispose?.();
+              obj.material = next;
+            }
+            obj.material.transmission = glassProps.transmission ?? 0.9;
+            obj.material.ior = glassProps.ior ?? 1.45;
+            obj.material.thickness = glassProps.thickness ?? 0.4;
+            obj.material.roughness = glassProps.roughness ?? 0.08;
+            obj.material.clearcoat = glassProps.clearcoat ?? 0.1;
+            obj.material.clearcoatRoughness = glassProps.clearcoatRoughness ?? 0.2;
+            obj.material.envMapIntensity = glassProps.envMapIntensity ?? 1.0;
+            if (glassProps.attenuationColor) obj.material.attenuationColor = new THREE.Color(glassProps.attenuationColor);
+            if (glassProps.attenuationDistance != null) obj.material.attenuationDistance = glassProps.attenuationDistance;
+            obj.material.map = texture || obj.material.map || null; // keep texture visible inside glass
+            obj.material.needsUpdate = true;
+          } else {
+            // Not glass: ensure standard-ish material works
+            if (!(obj.material instanceof THREE.MeshStandardMaterial)) {
+              const next = new THREE.MeshStandardMaterial();
+              next.color.copy(obj.material.color || new THREE.Color('#ffffff'));
+              next.roughness = obj.material.roughness ?? 0.6;
+              next.metalness = obj.material.metalness ?? 0.0;
+              obj.material.dispose?.();
+              obj.material = next;
+            }
+            obj.material.map = texture || obj.material.map || null;
             obj.material.needsUpdate = true;
           }
         }
@@ -190,7 +226,7 @@ export default function VaseModel({
     };
     applyTex(mainInstance);
     applyTex(shardsInstance);
-  }, [mainInstance, shardsInstance, texture]);
+  }, [mainInstance, shardsInstance, texture, glass, glassProps]);
 
   // Center vase for stable spin (horizontal center at 0, base at y=0) on the cloned instance.
   useCenterForSpin(mainInstance);

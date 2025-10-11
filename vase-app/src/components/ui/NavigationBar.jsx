@@ -22,6 +22,8 @@ export default function NavigationBar({
   onColorPicked,
   colorInputRef,
   barRef,
+  // New: glass toggle
+  onToggleGlass,
   // New: camera capture handlers
   onCameraCanvas,
   onCameraSetActive,
@@ -316,6 +318,15 @@ export default function NavigationBar({
         >
           upload
         </UIButton>
+        {/* New: Glass toggle */}
+        <UIButton
+          animated
+          onClick={onToggleGlass}
+          disabled={isLocked || isResetting}
+          style={{ fontSize: 14 }}
+        >
+          glass
+        </UIButton>
         {/* Existing: Camera button */}
         <UIButton
           animated
@@ -383,6 +394,7 @@ export default function NavigationBar({
                 width: 'min(80vw, 80vh)',
                 height: 'min(80vw, 80vh)',
                 background: 'black',
+                position: 'relative',
                 borderRadius: 10,
                 overflow: 'hidden',
                 border: '1px solid rgba(255,255,255,0.15)'
@@ -395,6 +407,24 @@ export default function NavigationBar({
                 playsInline
                 style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }}
               />
+              {hasMultipleCameras && (
+                <div style={{ position: 'absolute', top: 8, right: 8 }}>
+                  <UIButton
+                    animated
+                    onClick={flipCamera}
+                    style={{
+                      fontSize: 12,
+                      padding: '6px 10px',
+                      background: 'rgba(0,0,0,0.55)',
+                      color: '#fff',
+                      borderColor: 'rgba(255,255,255,0.5)'
+                    }}
+                    title="rotate camera"
+                  >
+                    rotate
+                  </UIButton>
+                </div>
+              )}
             </div>
             <div style={{ display: 'flex', gap: 10 }}>
               <UIButton animated onClick={onSnap} style={{ fontSize: 14 }}>SNAP</UIButton>

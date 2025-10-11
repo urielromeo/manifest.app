@@ -3,7 +3,7 @@ import "./App.css";
 import { VASE_COUNT, VASE_COLUMNS_COUNT, VASE_SPACING, VASE_TARGET_Y, INITIAL_CAMERA_DISTANCE, CAMERA_HEIGHT, INITIAL_CAMERA_Z, DESTROY_SHATTER_DURATION_MS, DESTROY_SENSOR_WINDOW_MS } from './config/constants.js';
 import * as THREE from "three";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { OrbitControls, useGLTF } from "@react-three/drei";
+import { OrbitControls, useGLTF, Environment } from "@react-three/drei";
 import { Physics, RigidBody, CuboidCollider } from '@react-three/rapier';
 import VaseModel, { MODEL_URL } from "./components/VaseModel.jsx";
 import FloatingTitle3D from "./components/FloatingTitle3D.jsx";
@@ -100,6 +100,8 @@ export default function App() {
     activeBaseLayers,
     baseColors,
     titles3D,
+    // new: glass flags
+    isGlassList,
     setTextureSourcesForVase,
     setActiveBaseLayerForVase,
     setBaseColorForVase,
@@ -272,6 +274,11 @@ export default function App() {
       setActiveBaseLayers(correctedActiveLayers);
       setBaseColors(mapped.baseColors);
       setTitles3D(mapped.titles3D);
+      // hydrate glass flags if hook supports it; fall back to false if undefined
+      if (mapped.isGlassList) {
+        // useVaseDesignState currently may not have a setter; store in a local ref if needed
+        // We'll manage persistence per toggle action below
+      }
       console.log('[App] hydration done');
     })();
     return () => { mounted = false; };
@@ -295,19 +302,54 @@ export default function App() {
     })();
   }, []);
 
-  // Load saved background image (skybox) once
+  // Load saved background image (skybox) once, with retries and Blob-safe handling
   useEffect(() => {
+    let canceled = false;
     (async () => {
       try { await textureStore.ready(); } catch {}
-      try {
-        const dataUrl = await textureStore.getItem('skybox:background');
-        if (typeof dataUrl === 'string' && dataUrl.startsWith('data:')) {
-          setSkyboxUrl(dataUrl);
+      const KEY = 'skybox:background';
+      const tryLoad = async () => {
+        try {
+          const val = await textureStore.getItem(KEY);
+          if (!val) return null;
+          if (typeof val === 'string') {
+            if (val.startsWith('data:')) return val;
+            return null;
+          }
+          if (val instanceof Blob) {
+            return await new Promise((resolve) => {
+              const url = URL.createObjectURL(val);
+              // We can't know when React will unmount, but we can pre-load to ensure it's valid and revoke afterwards
+              const img = new Image();
+              img.onload = () => { URL.revokeObjectURL(url); resolve(val ? URL.createObjectURL(val) : null); };
+              img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+              img.src = url;
+            });
+          }
+          if (val && typeof val === 'object' && val.dataURL && typeof val.dataURL === 'string') {
+            if (val.dataURL.startsWith('data:')) return val.dataURL;
+          }
+          return null;
+        } catch (e) {
+          console.warn('[App] Skybox load attempt failed', e);
+          return null;
         }
-      } catch (e) {
-        console.warn('[App] Failed to load saved skybox', e);
+      };
+      // Try a few times in case the storage driver is still initializing after a hard refresh
+      let dataUrl = await tryLoad();
+      if (!dataUrl) {
+        await new Promise((r) => setTimeout(r, 120));
+        dataUrl = await tryLoad();
+      }
+      if (!dataUrl) {
+        await new Promise((r) => setTimeout(r, 240));
+        dataUrl = await tryLoad();
+      }
+      if (!canceled && typeof dataUrl === 'string' && dataUrl.startsWith('data:')) {
+        setSkyboxUrl(dataUrl);
       }
     })();
+    return () => { canceled = true; };
   }, []);
 
   // Log active layer changes to confirm selection after hydration
@@ -824,7 +866,12 @@ export default function App() {
     if (didCleanupTexturesRef.current) return;
     // Delay slightly to allow initial migration persistence to run
     const t = setTimeout(() => {
-      const allowed = new Set(Array.from({ length: VASE_COUNT }, (_, i) => getFixedVaseSlotId(i)));
+      const allowed = new Set([
+        // Preserve fixed vase slots
+        ...Array.from({ length: VASE_COUNT }, (_, i) => getFixedVaseSlotId(i)),
+        // Also preserve the skybox background image key
+        'skybox:background',
+      ]);
       cleanupTexturesExcept(allowed).then(() => {
         didCleanupTexturesRef.current = true;
       }).catch(() => { /* ignore */ });
@@ -857,6 +904,7 @@ export default function App() {
         appearance: {
           baseColor: '#ffffff',
           activeBaseLayer: 'base',
+          isGlass: false,
           textureSlots: { base: undefined, upload: undefined, camera: undefined, textOverlay: '' },
         },
       });
@@ -941,6 +989,28 @@ export default function App() {
 
     setActiveAction('destroy');
   }, [appMode, isLocked, isResetting, destroyingIndex, activeVaseIndex]);
+
+  // New: toggle glass for current vase (persisted)
+  const handleToggleGlass = useCallback(() => {
+    if (appMode !== 'vases' || isLocked || isResetting) return;
+    const idx = activeVaseIndex;
+    setVases((prev) => {
+      const next = prev.map((v, i) => {
+        if (i !== idx) return v;
+        const current = !!v?.appearance?.isGlass;
+        return { ...v, appearance: { ...v.appearance, isGlass: !current } };
+      });
+      (async () => {
+        try {
+          const isGlass = !!next[idx]?.appearance?.isGlass;
+          await updateVaseAt(next, idx, { appearance: { isGlass } });
+        } catch (e) {
+          console.error('Failed to persist isGlass:', e);
+        }
+      })();
+      return next;
+    });
+  }, [appMode, isLocked, isResetting, activeVaseIndex]);
 
   // Info modal: app metadata + reset-all-data
   const appMeta = useMemo(() => ({
@@ -1189,6 +1259,7 @@ export default function App() {
           onResetCamera={handleResetCamera}
           onManifest={handleTriggerManifest}
           onDestroy={handleTriggerDestroy}
+          onToggleGlass={handleToggleGlass}
           allowDestroyWhileLocked
           onColorPicked={handleColorPicked}
           colorInputRef={colorInputRef}
@@ -1264,8 +1335,10 @@ export default function App() {
         <Canvas
           camera={{ position: appMode === 'title' ? [TITLE_CAMERA_POS.x, TITLE_CAMERA_POS.y, TITLE_CAMERA_POS.z] : [0, CAMERA_HEIGHT, INITIAL_CAMERA_Z], fov: 50 }}
         >
-        {skyboxUrl ? <SceneBackgroundImage url={skyboxUrl} /> : null}
-        <ambientLight intensity={0.6} />
+  {skyboxUrl ? <SceneBackgroundImage url={skyboxUrl} /> : null}
+  {/* Subtle studio-like environment for reflections/refractions (especially for glass text) */}
+  <Environment preset="studio" background={false} />
+        <ambientLight intensity={0.1} />
         <directionalLight position={[2, 4, 2]} intensity={1} />
         <Physics
           colliders={false}
@@ -1302,6 +1375,7 @@ export default function App() {
                   <RigidBody type="fixed" colliders="trimesh">
                     <VaseModel
                       texture={composedTextures[i] || defaultTexture}
+                      glass={!!vases[i]?.appearance?.isGlass}
                       rotateWithPointer={isActive}
                       onVasePointerDown={isActive ? handleVasePointerDown : undefined}
                       shattered={destroyingIndex === i}
@@ -1354,7 +1428,9 @@ export default function App() {
             position={[TITLE_TARGET.x, TITLE_TARGET.y, TITLE_TARGET.z]}
             size={titleSize}
             thickness={0.15}
-            color="#333333"
+            color="#88aaff"
+            glass
+            glassProps={{ transmission: 1, roughness: 0.05, thickness: 0.5, ior: 1.45, envMapIntensity: 1.2 }}
           />
         )}
         {/* Removed single global title; per-vase titles handled inline */}

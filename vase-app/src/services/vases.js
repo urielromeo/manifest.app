@@ -52,7 +52,8 @@ export function mapVasesToUiState(vases) {
   const activeBaseLayers = vases.map(v => v.appearance.activeBaseLayer);
   const baseColors = vases.map(v => v.appearance.baseColor);
   const titles3D = vases.map(v => v.labels.vaseText || '');
-  return { textureSourcesList, activeBaseLayers, baseColors, titles3D };
+  const isGlassList = vases.map(v => !!v.appearance.isGlass);
+  return { textureSourcesList, activeBaseLayers, baseColors, titles3D, isGlassList };
 }
 
 /** Persist entire vases array */

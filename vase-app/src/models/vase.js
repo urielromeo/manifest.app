@@ -24,6 +24,7 @@
  * @property {{
  *   baseColor: string,
  *   activeBaseLayer: BaseLayer,
+ *   isGlass?: boolean,
  *   textureSlots: {
  *     base?: TextureRef,
  *     upload?: TextureRef,
@@ -57,6 +58,7 @@ export function createVase(init) {
     appearance: {
       baseColor: init.appearance?.baseColor ?? '#ffffff',
       activeBaseLayer: init.appearance?.activeBaseLayer ?? 'base',
+      isGlass: init.appearance?.isGlass ?? false,
       textureSlots: {
         base: init.appearance?.textureSlots?.base,
         upload: init.appearance?.textureSlots?.upload,
