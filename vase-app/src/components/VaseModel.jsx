@@ -73,6 +73,14 @@ function useCenterForSpin(object3D) {
  * Props:
  *  - texture: THREE.Texture (optional)
  *  - rotateWithPointer: boolean to enable manual drag rotation (locks camera in parent)
+ *  - Destroy/shatter controls
+ *  - shattered: boolean
+ *  - shatterTriggerId: number
+ *  - onShatterComplete: function callback
+ *  - Distance-based boost shaping for explosion impulse
+ *  // Distance-based boost shaping for explosion impulse
+ *  //  - centerOffset: [x, y, z] offset in WORLD space to nudge the blast origin (default [0,0,0])
+ *  //  - showBlastGizmo: boolean to draw a small sphere at the explosion center (default false)
  */
 export default function VaseModel({
   texture,
@@ -85,6 +93,16 @@ export default function VaseModel({
   shattered = false,
   shatterTriggerId = 0,
   onShatterComplete,
+  // How long shards simulate before finishing (ms)
+  shatterDurationMs = 5000,
+  // Distance-based boost shaping for explosion impulse
+  // If geometry center/falloff feels off, tweak these (defaults preserve current behavior):
+  // distBoost = 1 + clamp( max( (dist + distBias) * distScale, 0 ), distClamp )
+  distBias,   // default 0
+  distScale,  // default 0.15
+  distClamp,  // default 0.5
+  centerOffset = [0, 0, 0], // world-space offset for explosion center
+  showBlastGizmo = false, // draw a small sphere at the computed explosion center
   children,
 }) {
   const { scene: mainScene } = useGLTF(MODEL_URL);
@@ -97,6 +115,7 @@ export default function VaseModel({
   const shardsInitialRef = useRef(new Map()); // Map<Mesh, { p: Vector3, q: Quaternion, s: Vector3 }>
   const shardsElapsedRef = useRef(0);   // seconds since current shatter started
   const shardsStartRef = useRef(0);     // performance.now() at shatter start (ms)
+  const blastGizmoRef = useRef(null);
   // Track last processed trigger to avoid Strict Mode double-effect re-initialization
   const lastProcessedTriggerRef = useRef(null);
 
@@ -204,6 +223,22 @@ export default function VaseModel({
     // Compute approximate center in world space once
     const bbox = new THREE.Box3().setFromObject(shardsInstance);
     const centerWorld = bbox.getCenter(new THREE.Vector3());
+
+    // Manually nudge the explosion center (WORLD space) via prop [x, y, z]
+    // Example usage: <VaseModel shattered centerOffset={[0.1, 0.2, -0.05]} />
+    if (Array.isArray(centerOffset) && centerOffset.length === 3) {
+      centerWorld.add(new THREE.Vector3(centerOffset[0], centerOffset[1], centerOffset[2]));
+    } else if (centerOffset && typeof centerOffset === 'object' && 'x' in centerOffset) {
+      // also accept a THREE.Vector3-like object
+      centerWorld.add(new THREE.Vector3(centerOffset.x || 0, centerOffset.y || 0, centerOffset.z || 0));
+    }
+
+    // If requested, position a small gizmo at the explosion center
+    if (showBlastGizmo && blastGizmoRef.current) {
+      blastGizmoRef.current.position.copy(centerWorld);
+      blastGizmoRef.current.visible = true;
+    }
+
     const tmpWorld = new THREE.Vector3();
     const rng = (min, max) => Math.random() * (max - min) + min;
 
@@ -212,15 +247,26 @@ export default function VaseModel({
     shardsStartRef.current = performance.now();
 
     // Tunables for "explosion" feel
-    const baseStrength = 5.0;   // overall impulse magnitude
-    const randJitter   = 1.0;    // random variation added to base strength
+    const baseStrength = 10.0;   // overall impulse magnitude
+    const randJitter   = 10.0;    // random variation added to base strength
     const upBias       = 0.55;   // extra upward kick as a fraction of strength
 
     meshes.forEach((m) => {
       m.updateWorldMatrix(true, false);
-      m.getWorldPosition(tmpWorld);
-      // Direction from epicenter to shard
-      const dir = tmpWorld.clone().sub(centerWorld);
+
+      // Use the shard's GEOMETRY center (in local space), transformed to WORLD space
+      let shardCenterWorld = new THREE.Vector3();
+      if (m.geometry && m.geometry.attributes && m.geometry.attributes.position) {
+        if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
+        const localCenter = m.geometry.boundingBox.getCenter(new THREE.Vector3());
+        shardCenterWorld.copy(localCenter).applyMatrix4(m.matrixWorld);
+      } else {
+        // Fallback: mesh origin in world space
+        m.getWorldPosition(shardCenterWorld);
+      }
+
+      // Direction from epicenter to shard center
+      const dir = shardCenterWorld.clone().sub(centerWorld);
       const dist = dir.length();
       if (dist < 1e-5) {
         // Avoid degenerate vectors; randomize slightly
@@ -229,7 +275,14 @@ export default function VaseModel({
       dir.normalize();
 
       // Make farther shards get a little more kick (subtle so it feels radial)
-      const distBoost = 1 + Math.min(dist * 0.15, 0.5); // up to +50%
+      // You can tweak via props: distBias, distScale, distClamp
+      // distBoost = 1 + clamp( max( (dist + distBias) * distScale, 0 ), distClamp )
+      const effBias = (distBias ?? 10);
+      const effScale = (distScale ?? 0.15);
+      const effClamp = (distClamp ?? 0.5);
+      const scaled = (dist + effBias) * effScale;
+      const clamped = Math.min(Math.max(scaled, 0), effClamp);
+      const distBoost = 1 + clamped; // default behavior: 1 + min(dist * 0.15, 0.5)
       const strength = (baseStrength + rng(0, randJitter)) * distBoost;
 
       const v = dir.multiplyScalar(strength);
@@ -241,12 +294,12 @@ export default function VaseModel({
 
     shardsActiveRef.current = true;
 
-    // Set 5s timeout to finish
+    // Finish after configured duration
     shatterTimeoutRef.current = setTimeout(() => {
       shardsActiveRef.current = false;
       onShatterComplete && onShatterComplete();
-    }, 5000);
-  }, [shattered, shatterTriggerId, shardsInstance, onShatterComplete]);
+    }, Math.max(0, shatterDurationMs));
+  }, [shattered, shatterTriggerId, shardsInstance, onShatterComplete, centerOffset, showBlastGizmo, shatterDurationMs]);
 
   // Teardown when leaving shattered state or on unmount
   useEffect(() => {
@@ -258,6 +311,9 @@ export default function VaseModel({
       shardsActiveRef.current = false;
       shardsElapsedRef.current = 0;
       shardsStartRef.current = 0;
+    }
+    if (!shattered && blastGizmoRef.current) {
+      blastGizmoRef.current.visible = false;
     }
     return () => {
       // On unmount, ensure timers are cleared
@@ -372,6 +428,12 @@ export default function VaseModel({
     >
       {!shattered && mainInstance && <primitive object={mainInstance} />}
       {shattered && shardsInstance && <primitive object={shardsInstance} />}
+      {showBlastGizmo && (
+        <mesh ref={blastGizmoRef} visible={false}>
+          <sphereGeometry args={[0.5, 16, 16]} />
+          <meshBasicMaterial color={0xff3333} />
+        </mesh>
+      )}
       {children}
     </group>
   );

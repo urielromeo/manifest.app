@@ -25,6 +25,11 @@ export default function NavigationBar({
   // New: camera capture handlers
   onCameraCanvas,
   onCameraSetActive,
+  // New: upload handlers
+  onUploadCanvas,
+  onUploadSetActive,
+  // If true, keep destroy button enabled even while locked (to allow re-trigger)
+  allowDestroyWhileLocked = false,
 }) {
   // --- Camera capture state ---
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -32,6 +37,8 @@ export default function NavigationBar({
   const [hasMultipleCameras, setHasMultipleCameras] = useState(false);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  // Hidden file input for upload
+  const uploadInputRef = useRef(null);
 
   // Try to detect if device has multiple cameras
   useEffect(() => {
@@ -135,6 +142,53 @@ export default function NavigationBar({
     stopCamera();
   };
 
+  // --- Upload handling (cover-fit to 1024x1024 like Uploader.jsx) ---
+  const handleOpenUpload = () => {
+    if (isLocked || isResetting) return;
+    uploadInputRef.current?.click();
+  };
+
+  const handleUploadChange = async (e) => {
+    const file = e.target.files?.[0];
+    // Clear value so selecting the same file later still triggers change
+    e.target.value = '';
+    if (!file) return;
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const SIZE = 1024;
+          const canvas = document.createElement('canvas');
+          canvas.width = canvas.height = SIZE;
+          const ctx = canvas.getContext('2d');
+          // cover fit
+          const iw = img.width, ih = img.height;
+          const scale = Math.max(SIZE / iw, SIZE / ih);
+          const dw = iw * scale, dh = ih * scale;
+          const dx = (SIZE - dw) / 2;
+          const dy = (SIZE - dh) / 2;
+          ctx.clearRect(0, 0, SIZE, SIZE);
+          ctx.drawImage(img, dx, dy, dw, dh);
+          // Inform parent
+          onUploadSetActive && onUploadSetActive();
+          onUploadCanvas && onUploadCanvas(canvas);
+        } finally {
+          URL.revokeObjectURL(objectUrl);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        alert('Failed to load image. Please try a different file.');
+      };
+      img.src = objectUrl;
+    } catch (err) {
+      console.error('[NavigationBar] Upload failed:', err);
+      try { URL.revokeObjectURL(objectUrl); } catch {}
+      alert('Failed to load image as texture. See console for details.');
+    }
+  };
+
   return (
     <div
       ref={barRef}
@@ -144,7 +198,7 @@ export default function NavigationBar({
         bottom: 10,
         left: '50%',
         transform: 'translateX(-50%)',
-        zIndex: 12,
+        zIndex: 1201,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
@@ -187,6 +241,20 @@ export default function NavigationBar({
         >
           <ArrowRight size={20} strokeWidth={2} />
         </UIButton>
+        <div style={{ width: 1, height: 28, background: 'rgba(0,0,0,0.12)', margin: '0 4px' }} />
+
+        <UIButton animated onClick={onManifest} disabled={isLocked || isResetting} style={{ fontSize: 14 }}>
+          manifest
+        </UIButton>
+        <UIButton
+          animated
+          onClick={onDestroy}
+          disabled={(isLocked && !allowDestroyWhileLocked) || isResetting}
+          style={{ fontSize: 14 }}
+        >
+          destroy
+        </UIButton>
+
       </div>
 
       {/* Row 2: vase controls + actions */}
@@ -200,6 +268,16 @@ export default function NavigationBar({
         <UIButton animated onClick={onSet3DTitle} disabled={isLocked || isResetting} style={{ fontSize: 14 }}>
           3d text
         </UIButton>
+        {/* New: Upload button */}
+        <UIButton
+          animated
+          onClick={handleOpenUpload}
+          disabled={isLocked || isResetting}
+          style={{ fontSize: 14 }}
+        >
+          upload
+        </UIButton>
+        {/* Existing: Camera button */}
         <UIButton
           animated
           onClick={() => startCamera('user')}
@@ -207,13 +285,6 @@ export default function NavigationBar({
           style={{ fontSize: 14 }}
         >
           photo
-        </UIButton>
-        <div style={{ width: 1, height: 28, background: 'rgba(0,0,0,0.12)', margin: '0 4px' }} />
-        <UIButton animated onClick={onManifest} disabled={isLocked || isResetting} style={{ fontSize: 14 }}>
-          manifest
-        </UIButton>
-        <UIButton animated onClick={onDestroy} disabled={isLocked || isResetting} style={{ fontSize: 14 }}>
-          destroy
         </UIButton>
       </div>
 
@@ -223,6 +294,14 @@ export default function NavigationBar({
         type="color"
         defaultValue={baseColor || '#ffffff'}
         onChange={onColorPicked}
+        style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 0, height: 0 }}
+      />
+      {/* Hidden upload input */}
+      <input
+        ref={uploadInputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleUploadChange}
         style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 0, height: 0 }}
       />
 

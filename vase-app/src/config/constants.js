@@ -11,3 +11,9 @@ export const INITIAL_CAMERA_Z = Math.max(
   0,
   Math.sqrt(Math.max(0, INITIAL_CAMERA_DISTANCE**2 - CAMERA_HEIGHT**2))
 );
+
+// --- Destroy/shatter tuning ---
+// Total time the shattered vase runs before calling onShatterComplete (ms)
+export const DESTROY_SHATTER_DURATION_MS = 5000;
+// Time window to open the inner sensor so shards/coins can escape (ms)
+export const DESTROY_SENSOR_WINDOW_MS = 800;

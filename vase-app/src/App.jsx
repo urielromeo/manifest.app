@@ -1,6 +1,6 @@
 import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback, useContext } from "react";
 import "./App.css";
-import { VASE_COUNT, VASE_COLUMNS_COUNT, VASE_SPACING, VASE_TARGET_Y, INITIAL_CAMERA_DISTANCE, CAMERA_HEIGHT, INITIAL_CAMERA_Z } from './config/constants.js';
+import { VASE_COUNT, VASE_COLUMNS_COUNT, VASE_SPACING, VASE_TARGET_Y, INITIAL_CAMERA_DISTANCE, CAMERA_HEIGHT, INITIAL_CAMERA_Z, DESTROY_SHATTER_DURATION_MS, DESTROY_SENSOR_WINDOW_MS } from './config/constants.js';
 import * as THREE from "three";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, useGLTF } from "@react-three/drei";
@@ -21,6 +21,8 @@ import CameraResetAnimator from './components/camera/CameraResetAnimator.jsx';
 import useVaseDesignState from './hooks/useVaseDesignState.js';
 import useCoinsByVase from './hooks/useCoinsByVase.js';
 import { loadCanvasFromTextureRef, saveCanvasToFixedVaseSlot, cleanupTexturesExcept, getFixedVaseSlotId } from './services/textures.js';
+import localforage from 'localforage';
+import pkg from '../package.json';
 
 export const VaseShatterContext = React.createContext({ phase: 'idle', center: [0,0,0], trigger: 0 });
 
@@ -77,6 +79,7 @@ export default function App() {
   const { coinsByVase, spawnCoinForVase, setCoinsByVase, clearCoinsForVase } = useCoinsByVase();
   // Stats modal state
   const [isStatsModalOpen, setIsStatsModalOpen] = useState(false);
+  const [isInfoOpen, setIsInfoOpen] = useState(false);
   // spawnCoinForVase provided by useCoinsByVase
   // Debug: toggle Rapier collider wireframes
   const [debugPhysics, setDebugPhysics] = useState(false);
@@ -491,36 +494,41 @@ export default function App() {
     setActiveAction(null);
   }, [activeAction, activeVaseIndex, isLocked, spawnCoinForVase]);
 
-  // Trigger destroy when action becomes 'destroy' and we're not already locked
+  // Trigger destroy when action becomes 'destroy'.
   useEffect(() => {
     if (activeAction !== 'destroy') return;
-    // Only allow when not locked
-    if (isLocked || destroyingIndex !== null) {
-      setActiveAction(null);
-      return;
-    }
-    // Prevent re-entry for the same vase even if this effect runs more than once
     const idx = activeVaseIndex;
-    if (destroyingVasesRef.current.has(idx)) {
+
+    // If a destroy is already in progress
+    if (destroyingIndex !== null) {
+      // Re-trigger only if it's the same vase: restart the shatter animation for a nicer feel
+      if (destroyingIndex === idx) {
+        // bump trigger id so VaseModel restarts its shatter
+        setDestroyEventId((id) => id + 1);
+        // reopen the sensor window
+        setVaseSensorWindows(prev => prev.map((v, i) => i === idx ? true : v));
+        if (sensorTimersRef.current[idx]) clearTimeout(sensorTimersRef.current[idx]);
+        sensorTimersRef.current[idx] = setTimeout(() => {
+          setVaseSensorWindows(prev => prev.map((v, i) => i === idx ? false : v));
+          delete sensorTimersRef.current[idx];
+        }, DESTROY_SENSOR_WINDOW_MS);
+      }
       setActiveAction(null);
       return;
     }
+
+    // Fresh destroy start
+    if (destroyingVasesRef.current.has(idx)) { setActiveAction(null); return; }
     destroyingVasesRef.current.add(idx);
-    // Start destroy on current active vase
     setIsLocked(true);
     setDestroyingIndex(idx);
     setDestroyEventId((id) => id + 1);
-    // Open a short sensor window on this vase so shards/coins can blow outward, then restore solid walls
     setVaseSensorWindows(prev => prev.map((v, i) => i === idx ? true : v));
-    // Clear any previous timer for this vase index
-    if (sensorTimersRef.current[idx]) {
-      clearTimeout(sensorTimersRef.current[idx]);
-    }
+    if (sensorTimersRef.current[idx]) { clearTimeout(sensorTimersRef.current[idx]); }
     sensorTimersRef.current[idx] = setTimeout(() => {
       setVaseSensorWindows(prev => prev.map((v, i) => i === idx ? false : v));
       delete sensorTimersRef.current[idx];
-    }, 800); // ~0.8s window
-    // Clear the action button selection immediately
+    }, DESTROY_SENSOR_WINDOW_MS);
     setActiveAction(null);
   }, [activeAction, isLocked, destroyingIndex, activeVaseIndex]);
 
@@ -837,12 +845,133 @@ export default function App() {
   }, [appMode, isLocked, isResetting, activeVaseIndex]);
 
   const handleTriggerDestroy = useCallback(() => {
-    if (appMode !== 'vases' || isLocked || isResetting) return;
+    if (appMode !== 'vases' || isResetting) return;
+    // If locked, only allow when re-triggering the same vase that's currently destroying
+    if (isLocked && destroyingIndex !== activeVaseIndex) return;
+    // Optimistically increment the destroy counter immediately for better UX
+    const idx = activeVaseIndex;
+    setVases((prev) => {
+      const next = prev.map((v, i) => {
+        if (i !== idx) return v;
+        const current = v?.stats?.destroyCount ?? 0;
+        return {
+          ...v,
+          stats: {
+            ...v.stats,
+            destroyCount: current + 1,
+          },
+        };
+      });
+      // Persist asynchronously based on the updated state
+      (async () => {
+        try {
+          const newCount = next[idx]?.stats?.destroyCount ?? 0;
+          await updateVaseAt(next, idx, { stats: { destroyCount: newCount } });
+        } catch (e) {
+          console.error('Failed to persist destroyCount:', e);
+        }
+      })();
+      return next;
+    });
+
     setActiveAction('destroy');
-  }, [appMode, isLocked, isResetting]);
+  }, [appMode, isLocked, isResetting, destroyingIndex, activeVaseIndex]);
+
+  // Info modal: app metadata + reset-all-data
+  const appMeta = useMemo(() => ({
+    title: (pkg && pkg.name) ? pkg.name : (typeof document !== 'undefined' ? document.title : 'App'),
+    version: (pkg && pkg.version) ? pkg.version : '0.0.0',
+    author: (pkg && (pkg.author || (pkg.authors && pkg.authors.join(', ')))) ? (pkg.author || (pkg.authors && pkg.authors.join(', '))) : 'unknown',
+  }), []);
+
+  const handleResetAllData = useCallback(async () => {
+    const ok = window.confirm('This will permanently erase all saved vases, textures, and stats on this device. Continue?');
+    if (!ok) return;
+    try {
+      // Drop the entire IndexedDB database used by localforage for this app
+      await localforage.dropInstance({ name: 'manifest-app' });
+    } catch (e) {
+      // As a fallback, try clearing any default instance as well
+      try { await localforage.clear(); } catch (_) { /* ignore */ }
+      // Swallow errors; we'll still reload
+    }
+    // Reload to reinitialize fresh state
+    window.location.reload();
+  }, []);
 
   return (
     <div ref={containerRef} style={{ width: "100vw", height: "100svh", overflow: "hidden" }}>
+      {/* Info button (top-left) */}
+      <div style={{ position: 'absolute', top: 8, left: 8, zIndex: 1200, pointerEvents: 'auto' }}>
+        <UIButton onClick={() => setIsInfoOpen(true)} style={{ fontSize: 14 }}>info</UIButton>
+      </div>
+
+      {/* Info modal */}
+      {isInfoOpen && (
+        <div
+          onClick={() => setIsInfoOpen(false)}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: 'rgba(0,0,0,0.45)',
+            zIndex: 1300,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            pointerEvents: 'auto',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 'min(92vw, 420px)',
+              background: '#fff',
+              color: '#111',
+              borderRadius: 12,
+              boxShadow: '0 12px 32px rgba(0,0,0,0.25)',
+              padding: 16,
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>About this app</div>
+              <button
+                onClick={() => setIsInfoOpen(false)}
+                style={{ background: 'transparent', border: 'none', fontSize: 18, cursor: 'pointer' }}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <div style={{ lineHeight: 1.6, textAlign: 'left', fontSize: 14 }}>
+              <em>What is this?</em><br />
+              My take on productivity tracking apps.
+              <br /><br />
+
+              <em>How it works</em><br />
+              Each vase represents a task, project, or goal you want to nurture.
+              You can name it, give it a 3D title, and customize its appearance with colors and textures. <br />
+              <br />
+              <em>What persists (and what doesn’t)</em><br />
+              Saved locally on this device: vase names, colors, overlays, and simple stats.
+              No servers, no tracking. If you clear site data (or press “reset all data”), it’s gone, by design.
+              <br /><br />
+
+              <em>Materials & tools</em><br />
+              React + react-three-fiber (Three.js), drei, Rapier physics, Vite, localforage.
+              Source code is open, peek, fork, or remix: <a href="https://github.com/urielromeo/manifest.app">view source</a>.
+              <br /><br />
+
+              Made by <a href="https://urielromeo.com">Uriel Romeo</a>
+
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
+              <UIButton animated onClick={handleResetAllData} style={{ fontSize: 14, background: '#ffe9e9', borderColor: '#e55' }}>
+                reset all data
+              </UIButton>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Top-center info bar showing creation time for the active vase (vases mode only) */}
       {appMode === 'vases' && vases[activeVaseIndex] && (
         <div
@@ -995,14 +1124,21 @@ export default function App() {
           onResetCamera={handleResetCamera}
           onManifest={handleTriggerManifest}
           onDestroy={handleTriggerDestroy}
+          allowDestroyWhileLocked
           onColorPicked={handleColorPicked}
           colorInputRef={colorInputRef}
           barRef={bottomBarRef}
+          // Camera handlers
           onCameraCanvas={(c) => {
             console.log('[App] onCameraCanvas received canvas for vase', activeVaseIndex);
             setTextureSourcesForVase(activeVaseIndex, s => ({ ...s, camera: c }));
           }}
           onCameraSetActive={() => setActiveBaseLayerForVase(activeVaseIndex, 'camera')}
+          // New: Upload handlers
+          onUploadCanvas={(c) => {
+            setTextureSourcesForVase(activeVaseIndex, s => ({ ...s, upload: c }));
+          }}
+          onUploadSetActive={() => setActiveBaseLayerForVase(activeVaseIndex, 'upload')}
         />
       )}
 
@@ -1087,6 +1223,7 @@ export default function App() {
                       onVasePointerDown={isActive ? handleVasePointerDown : undefined}
                       shattered={destroyingIndex === i}
                       shatterTriggerId={destroyEventId}
+                      shatterDurationMs={DESTROY_SHATTER_DURATION_MS}
                       onShatterComplete={() => {
                         if (i === destroyingIndex) {
                           setDestroyingIndex(null);
@@ -1095,29 +1232,6 @@ export default function App() {
                           setCoinsByVase(prev => prev.map((arr, idx) => (idx === i ? [] : arr)));
                           // Allow this vase to be destroyed again in the future
                           destroyingVasesRef.current.delete(i);
-                          // Increment destroyed count and persist
-                          setVases((prev) => {
-                            const next = prev.map((v, idx2) => {
-                              if (idx2 !== i) return v;
-                              const current = v?.stats?.destroyCount ?? 0;
-                              return {
-                                ...v,
-                                stats: {
-                                  ...v.stats,
-                                  destroyCount: current + 1,
-                                },
-                              };
-                            });
-                            (async () => {
-                              try {
-                                const newCount = next[i]?.stats?.destroyCount ?? 0;
-                                await updateVaseAt(next, i, { stats: { destroyCount: newCount } });
-                              } catch (e) {
-                                console.error('Failed to persist destroyCount:', e);
-                              }
-                            })();
-                            return next;
-                          });
                         }
                       }}
                     />
