@@ -20,7 +20,7 @@ import { createSolidColorCanvas, createTextOverlayCanvas } from "./utils/canvas.
 import CameraResetAnimator from './components/camera/CameraResetAnimator.jsx';
 import useVaseDesignState from './hooks/useVaseDesignState.js';
 import useCoinsByVase from './hooks/useCoinsByVase.js';
-import { saveCanvasAsTexture, loadCanvasFromTextureRef } from './services/textures.js';
+import { loadCanvasFromTextureRef, saveCanvasToFixedVaseSlot, cleanupTexturesExcept, getFixedVaseSlotId } from './services/textures.js';
 
 export const VaseShatterContext = React.createContext({ phase: 'idle', center: [0,0,0], trigger: 0 });
 
@@ -101,6 +101,10 @@ export default function App() {
   const prevTexturesRef = useRef(
     Array.from({ length: VASE_COUNT }, () => ({ base: null, upload: null, camera: null }))
   );
+  // Track the last canvas+layer we wrote into the fixed texture slot per vase to avoid re-saving
+  const prevFixedSlotRef = useRef(
+    Array.from({ length: VASE_COUNT }, () => ({ layer: null, canvas: null }))
+  );
   const prevActiveLayerRef = useRef(Array.from({ length: VASE_COUNT }, () => 'base'));
   const prevBaseColorsRef = useRef(Array.from({ length: VASE_COUNT }, () => '#ffffff'));
   // Hold-to-repeat navigation support
@@ -172,10 +176,13 @@ export default function App() {
   useEffect(() => {
     let mounted = true;
     (async () => {
+      console.log('[App] load/init vases…');
       const vases = await loadOrInitVases();
       if (!mounted) return;
       setVases(vases);
       const mapped = mapVasesToUiState(vases);
+      console.log('[App] mapped UI state', mapped);
+      console.log('[App] active layers (mapped)', mapped.activeBaseLayers);
       // Initialize design state from storage mapping
       // Hydrate TextureRef objects into canvases for the compositor
       const hydrated = await Promise.all(
@@ -186,64 +193,107 @@ export default function App() {
           // If textOverlay string exists on the model, regenerate its canvas overlay
           const textStr = vases[i]?.appearance?.textureSlots?.textOverlay || '';
           const text = textStr ? createTextOverlayCanvas(textStr, 1024) : null;
+          console.log('[App] hydrated vase', i, {
+            hasBaseRef: !!entry.base, hasUploadRef: !!entry.upload, hasCameraRef: !!entry.camera,
+            baseCanvas: !!base, uploadCanvas: !!upload, cameraCanvas: !!camera, textStr
+          });
           return { base, upload, camera, text };
         })
       );
       setTextureSourcesList(hydrated);
       // Seed previous trackers to hydrated values to avoid immediate re-persist
       prevTexturesRef.current = hydrated.map(({ base, upload, camera }) => ({ base, upload, camera }));
-      prevActiveLayerRef.current = mapped.activeBaseLayers.slice();
+      // Prefer the mapped active layer; if missing, fall back to first available source
+      const correctedActiveLayers = mapped.activeBaseLayers.map((layer, i) => {
+        if (layer) return layer;
+        const h = hydrated[i];
+        if (h.camera) return 'camera';
+        if (h.upload) return 'upload';
+        return 'base';
+      });
+      prevActiveLayerRef.current = correctedActiveLayers.slice();
       prevBaseColorsRef.current = mapped.baseColors.slice();
-      setActiveBaseLayers(mapped.activeBaseLayers);
+      if (JSON.stringify(correctedActiveLayers) !== JSON.stringify(mapped.activeBaseLayers)) {
+        console.log('[App] corrected active layers', correctedActiveLayers);
+      }
+      setActiveBaseLayers(correctedActiveLayers);
       setBaseColors(mapped.baseColors);
       setTitles3D(mapped.titles3D);
+      console.log('[App] hydration done');
     })();
     return () => { mounted = false; };
   }, []);
+
+  // Ask for persistent storage when supported to reduce eviction risk under storage pressure
+  useEffect(() => {
+    (async () => {
+      try {
+        if (navigator?.storage?.persist) {
+          const already = await navigator.storage.persisted();
+          console.log('[App] storage persisted?', already);
+          if (!already) {
+            const granted = await navigator.storage.persist();
+            console.log('[App] storage persist grant', granted);
+          }
+        }
+      } catch (e) {
+        console.warn('[App] storage persist request failed', e);
+      }
+    })();
+  }, []);
+
+  // Log active layer changes to confirm selection after hydration
+  useEffect(() => {
+    console.log('[App] activeBaseLayers state', activeBaseLayers);
+  }, [activeBaseLayers]);
 
   // Persist newly assigned canvases or layer/color changes into storage
   useEffect(() => {
     // Compare and persist per vase
     textureSourcesList.forEach((entry, i) => {
       const prev = prevTexturesRef.current[i];
-      // base
-      if (entry.base && entry.base !== prev.base) {
+      // Only persist the currently active layer for each vase into a fixed per-vase slot (1–9)
+      const active = activeBaseLayers[i];
+      let canvasToPersist = null;
+      let mime = 'image/png';
+      if (active === 'base' && entry.base) { canvasToPersist = entry.base; mime = 'image/png'; }
+      else if (active === 'upload' && entry.upload) { canvasToPersist = entry.upload; mime = 'image/jpeg'; }
+      else if (active === 'camera' && entry.camera) { canvasToPersist = entry.camera; mime = 'image/jpeg'; }
+
+      if (canvasToPersist) {
+        const rec = prevFixedSlotRef.current[i];
+        // Skip if nothing relevant changed (same layer and same canvas object)
+        if (rec.layer === active && rec.canvas === canvasToPersist) {
+          return;
+        }
         (async () => {
           try {
-            const ref = await saveCanvasAsTexture(entry.base, 'image/png');
-            const updated = await updateVaseAt(vases, i, { appearance: { textureSlots: { base: ref } } });
+            const ref = await saveCanvasToFixedVaseSlot(i, canvasToPersist, mime);
+            // Clear non-active slots so we don't keep dangling references; keep only the active
+            const textureSlots = {
+              base: active === 'base' ? ref : null,
+              upload: active === 'upload' ? ref : null,
+              camera: active === 'camera' ? ref : null,
+            };
+            const updated = await updateVaseAt(vases, i, { appearance: { textureSlots } });
             setVases(updated);
-          } catch (e) { console.warn('Persist base texture failed', e); }
+            // Update last persisted record
+            rec.layer = active;
+            rec.canvas = canvasToPersist;
+          } catch (e) { console.warn('Persist active layer texture failed', e); }
         })();
-        prev.base = entry.base;
       }
-      // upload
-      if (entry.upload && entry.upload !== prev.upload) {
-        (async () => {
-          try {
-            const ref = await saveCanvasAsTexture(entry.upload, 'image/jpeg');
-            const updated = await updateVaseAt(vases, i, { appearance: { textureSlots: { upload: ref } } });
-            setVases(updated);
-          } catch (e) { console.warn('Persist upload texture failed', e); }
-        })();
-        prev.upload = entry.upload;
-      }
-      // camera
-      if (entry.camera && entry.camera !== prev.camera) {
-        (async () => {
-          try {
-            const ref = await saveCanvasAsTexture(entry.camera, 'image/jpeg');
-            const updated = await updateVaseAt(vases, i, { appearance: { textureSlots: { camera: ref } } });
-            setVases(updated);
-          } catch (e) { console.warn('Persist camera texture failed', e); }
-        })();
-        prev.camera = entry.camera;
-      }
+
+      // Track prev to avoid spamming saves when canvas identity stays the same
+      if (entry.base && entry.base !== prev.base) prev.base = entry.base;
+      if (entry.upload && entry.upload !== prev.upload) prev.upload = entry.upload;
+      if (entry.camera && entry.camera !== prev.camera) prev.camera = entry.camera;
     });
 
     // Active base layer changes
     activeBaseLayers.forEach((layer, i) => {
       if (layer !== prevActiveLayerRef.current[i]) {
+        console.log('[App] persist activeBaseLayer', i, layer);
         (async () => {
           try {
             const updated = await updateVaseAt(vases, i, { appearance: { activeBaseLayer: layer } });
@@ -257,6 +307,7 @@ export default function App() {
     // Base color changes (e.g., via desktop sidebar panel)
     baseColors.forEach((col, i) => {
       if (col && col !== prevBaseColorsRef.current[i]) {
+        console.log('[App] persist baseColor', i, col);
         (async () => {
           try {
             const updated = await updateVaseAt(vases, i, { appearance: { baseColor: col } });
@@ -650,6 +701,13 @@ export default function App() {
     if (input === null) return; // canceled
     const s = input.trim();
     setTitle3DForVase(activeVaseIndex, s);
+    // Persist 3D text on the model
+    (async () => {
+      try {
+        const updated = await updateVaseAt(vases, activeVaseIndex, { labels: { vaseText: s } });
+        setVases(updated);
+      } catch (e) { console.warn('Failed to persist 3D title', e); }
+    })();
   }, [appMode, isLocked, isResetting, activeVaseIndex, titles3D, setTitle3DForVase]);
 
   const handleOpenColorPicker = useCallback(() => {
@@ -671,13 +729,13 @@ export default function App() {
       try {
         let baseRef = null;
         if (canvas) {
-          baseRef = await saveCanvasAsTexture(canvas, 'image/png');
+          baseRef = await saveCanvasToFixedVaseSlot(idx, canvas, 'image/png');
         }
         const updated = await updateVaseAt(vases, idx, {
           appearance: {
             baseColor: val,
             activeBaseLayer: 'base',
-            textureSlots: { base: baseRef || undefined },
+            textureSlots: { base: baseRef || undefined, upload: null, camera: null },
           },
         });
         setVases(updated);
@@ -686,6 +744,20 @@ export default function App() {
       }
     })();
   }, [activeVaseIndex, setBaseColorForVase, setTextureSourcesForVase, setActiveBaseLayerForVase, createSolidColorCanvas]);
+
+  // One-time cleanup: ensure only fixed per-vase texture ids remain in the textures store
+  const didCleanupTexturesRef = useRef(false);
+  useEffect(() => {
+    if (didCleanupTexturesRef.current) return;
+    // Delay slightly to allow initial migration persistence to run
+    const t = setTimeout(() => {
+      const allowed = new Set(Array.from({ length: VASE_COUNT }, (_, i) => getFixedVaseSlotId(i)));
+      cleanupTexturesExcept(allowed).then(() => {
+        didCleanupTexturesRef.current = true;
+      }).catch(() => { /* ignore */ });
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [vases]);
 
   // Stats modal callbacks
   const handleOpenStatsModal = useCallback(() => {
@@ -927,19 +999,8 @@ export default function App() {
           colorInputRef={colorInputRef}
           barRef={bottomBarRef}
           onCameraCanvas={(c) => {
+            console.log('[App] onCameraCanvas received canvas for vase', activeVaseIndex);
             setTextureSourcesForVase(activeVaseIndex, s => ({ ...s, camera: c }));
-            (async () => {
-              try {
-                const ref = await saveCanvasAsTexture(c, 'image/jpeg');
-                const updated = await updateVaseAt(vases, activeVaseIndex, {
-                  appearance: {
-                    activeBaseLayer: 'camera',
-                    textureSlots: { camera: ref },
-                  },
-                });
-                setVases(updated);
-              } catch (e) { console.warn('Failed to persist camera texture', e); }
-            })();
           }}
           onCameraSetActive={() => setActiveBaseLayerForVase(activeVaseIndex, 'camera')}
         />

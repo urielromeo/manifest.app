@@ -1,5 +1,8 @@
 import { textureStore } from '../storage/index.js';
 
+const DEBUG = true;
+const log = (...args) => { if (DEBUG) console.log('[textures]', ...args); };
+
 /**
  * Convert a canvas to a Blob.
  * @param {HTMLCanvasElement} canvas
@@ -52,15 +55,64 @@ export async function hashBlob(blob) {
  * @returns {Promise<{ id: string, mime: string, width: number, height: number }>}
  */
 export async function saveCanvasAsTexture(canvas, mime = 'image/png') {
+  // Build a deterministic id from content hash
   const blob = await canvasToBlob(canvas, mime);
   const hash = await hashBlob(blob);
   const id = `tex:sha256:${hash}`;
-  // Deduplicate: only write if not present
+  // Use data URL to maximize compatibility (works with localStorage driver too)
+  const dataURL = canvas.toDataURL(mime, mime === 'image/png' ? undefined : 0.92);
+  try { await textureStore.ready(); } catch {}
+  const driver = textureStore.driver ? textureStore.driver() : 'unknown-driver';
+  log('saveCanvasAsTexture:', { id, mime, w: canvas.width, h: canvas.height, driver });
   const existing = await textureStore.getItem(id);
   if (!existing) {
-    await textureStore.setItem(id, blob);
+    await textureStore.setItem(id, dataURL);
+    log('stored new texture', id, 'size=', dataURL?.length || 0);
+  } else {
+    log('texture already stored, skipping write', id, 'type=', typeof existing);
   }
   return { id, mime, width: canvas.width, height: canvas.height };
+}
+
+/**
+ * Compute a fixed per-vase slot id. 1-based index (0->1, ... 8->9).
+ * Example: tex:vase-1
+ * @param {number} vaseIndexZeroBased
+ */
+export function getFixedVaseSlotId(vaseIndexZeroBased) {
+  const n = Number.isFinite(vaseIndexZeroBased) ? (vaseIndexZeroBased | 0) : 0;
+  return `tex:vase-${n + 1}`;
+}
+
+/**
+ * Save a canvas into a fixed per-vase slot (overwrites previous). Returns TextureRef-like.
+ * This guarantees at most 9 textures when used exclusively.
+ * @param {number} vaseIndexZeroBased
+ * @param {HTMLCanvasElement} canvas
+ * @param {string} [mime]
+ * @returns {Promise<{ id: string, mime: string, width: number, height: number }>}
+ */
+export async function saveCanvasToFixedVaseSlot(vaseIndexZeroBased, canvas, mime = 'image/png') {
+  const id = getFixedVaseSlotId(vaseIndexZeroBased);
+  const dataURL = canvas.toDataURL(mime, mime === 'image/png' ? undefined : 0.92);
+  try { await textureStore.ready(); } catch {}
+  const driver = textureStore.driver ? textureStore.driver() : 'unknown-driver';
+  log('saveCanvasToFixedVaseSlot:', { id, mime, w: canvas.width, h: canvas.height, driver });
+  await textureStore.setItem(id, dataURL);
+  return { id, mime, width: canvas.width, height: canvas.height };
+}
+
+/**
+ * Optional maintenance: remove any textures not in the allowed set of ids.
+ * Use cautiously; ensure no Vase still references removed ids.
+ * @param {Set<string>} allowed
+ */
+export async function cleanupTexturesExcept(allowed) {
+  try { await textureStore.ready(); } catch {}
+  const keys = await textureStore.keys();
+  const toRemove = keys.filter((k) => !allowed.has(k));
+  if (toRemove.length) log('cleanupTexturesExcept removing', toRemove.length, 'items');
+  await Promise.allSettled(toRemove.map((k) => textureStore.removeItem(k)));
 }
 
 /**
@@ -70,8 +122,43 @@ export async function saveCanvasAsTexture(canvas, mime = 'image/png') {
  */
 export async function getTextureBlob(id) {
   try {
-    const blob = await textureStore.getItem(id);
-    return blob || null;
+    try { await textureStore.ready(); } catch {}
+    const driver = textureStore.driver ? textureStore.driver() : 'unknown-driver';
+    log('getTextureBlob:', id, 'driver=', driver);
+    const val = await textureStore.getItem(id);
+    if (!val) return null;
+    if (val instanceof Blob) return val;
+    if (typeof val === 'string') {
+      // Support data URL stored as string
+      if (val.startsWith('data:')) {
+        try {
+          const res = await fetch(val);
+          const b = await res.blob();
+          log('loaded dataURL->Blob', id, 'blobSize=', b.size);
+          return b;
+        } catch (e) {
+          console.warn('[textures] Failed to convert dataURL to Blob', e);
+          return null;
+        }
+      }
+      // Unexpected string format; try to decode base64 if present
+      if (val.startsWith('base64,')) {
+        const dataUrl = 'data:application/octet-stream;' + val;
+        const res = await fetch(dataUrl);
+        const b = await res.blob();
+        log('loaded base64->Blob', id, 'blobSize=', b.size);
+        return b;
+      }
+      return null;
+    }
+    // Some drivers may have serialized to a plain object; try known shapes
+    if (val && typeof val === 'object' && val.dataURL) {
+      const res = await fetch(val.dataURL);
+      const b = await res.blob();
+      log('loaded object.dataURL->Blob', id, 'blobSize=', b.size);
+      return b;
+    }
+    return null;
   } catch (e) {
     console.warn('[textures] getTextureBlob failed for', id, e);
     return null;
@@ -86,6 +173,7 @@ export async function getTextureBlob(id) {
  */
 export async function loadCanvasFromTextureRef(ref, targetSize = 1024) {
   if (!ref?.id) return null;
+  log('loadCanvasFromTextureRef start', ref.id);
   const blob = await getTextureBlob(ref.id);
   if (!blob) return null;
   const url = URL.createObjectURL(blob);
@@ -96,6 +184,7 @@ export async function loadCanvasFromTextureRef(ref, targetSize = 1024) {
       i.onerror = reject;
       i.src = url;
     });
+    log('image loaded for', ref.id, 'natural=', img.naturalWidth, 'x', img.naturalHeight);
     const canvas = document.createElement('canvas');
     canvas.width = canvas.height = targetSize;
     const ctx = canvas.getContext('2d');
@@ -109,6 +198,7 @@ export async function loadCanvasFromTextureRef(ref, targetSize = 1024) {
     const dy = (targetSize - dh) / 2;
     ctx.clearRect(0, 0, targetSize, targetSize);
     ctx.drawImage(img, dx, dy, dw, dh);
+    log('canvas drawn for', ref.id, 'size=', targetSize);
     return canvas;
   } catch (e) {
     console.warn('[textures] loadCanvasFromTextureRef failed', ref, e);

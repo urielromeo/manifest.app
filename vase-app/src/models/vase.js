@@ -74,18 +74,25 @@ export function createVase(init) {
  * @returns {Vase}
  */
 export function updateVase(vase, patch) {
+  const v = vase;
   return {
-    ...vase,
+    ...v,
     ...patch,
-    stats: { ...vase.stats, ...patch.stats },
-    labels: { ...vase.labels, ...patch.labels },
     appearance: {
-      ...vase.appearance,
+      ...v.appearance,
       ...patch.appearance,
       textureSlots: {
-        ...vase.appearance.textureSlots,
-        ...(patch.appearance?.textureSlots ?? {}),
+        ...v.appearance?.textureSlots,
+        ...patch.appearance?.textureSlots,
       },
+    },
+    stats: {
+      ...v.stats,
+      ...patch.stats,
+    },
+    labels: {
+      ...v.labels,
+      ...patch.labels,
     },
     updatedAt: new Date().toISOString(),
   };
