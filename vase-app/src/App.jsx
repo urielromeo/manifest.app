@@ -22,6 +22,7 @@ import useVaseDesignState from './hooks/useVaseDesignState.js';
 import useCoinsByVase from './hooks/useCoinsByVase.js';
 import { loadCanvasFromTextureRef, saveCanvasToFixedVaseSlot, cleanupTexturesExcept, getFixedVaseSlotId } from './services/textures.js';
 import localforage from 'localforage';
+import { textureStore } from './storage/index.js';
 import pkg from '../package.json';
 
 export const VaseShatterContext = React.createContext({ phase: 'idle', center: [0,0,0], trigger: 0 });
@@ -34,6 +35,53 @@ const TITLE_CAMERA_POS = new THREE.Vector3(0, 7, -92);
 
 // --- Helper component for camera reset animation ---
 const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3); // hoisted to avoid re-allocation each frame
+
+// Background as a skydome that follows the camera (rotates as you orbit)
+function SceneBackgroundImage({ url }) {
+  const { camera } = useThree();
+  const groupRef = useRef();
+  const [texture, setTexture] = useState(null);
+
+  useEffect(() => {
+    let canceled = false;
+    if (!url) {
+      setTexture(null);
+      return;
+    }
+    const loader = new THREE.TextureLoader();
+    loader.load(
+      url,
+      (tex) => {
+        if (canceled) { tex.dispose(); return; }
+        tex.colorSpace = THREE.SRGBColorSpace;
+        setTexture(tex);
+      },
+      undefined,
+      (err) => {
+        console.warn('[App] Failed to load background texture', err);
+      }
+    );
+    return () => { canceled = true; };
+  }, [url]);
+
+  useEffect(() => () => { if (texture) texture.dispose(); }, [texture]);
+
+  useFrame(() => {
+    if (groupRef.current) {
+      groupRef.current.position.copy(camera.position);
+    }
+  });
+
+  if (!texture) return null;
+  return (
+    <group ref={groupRef}>
+      <mesh frustumCulled={false}>
+        <sphereGeometry args={[200, 32, 24]} />
+        <meshBasicMaterial map={texture} side={THREE.BackSide} depthWrite={false} />
+      </mesh>
+    </group>
+  );
+}
 
 // NavigationBar extracted to component
 
@@ -86,6 +134,8 @@ export default function App() {
   // Mobile layout adjustment
   const bottomBarRef = useRef(null);
   const [bottomBarHeight, setBottomBarHeight] = useState(0);
+  // Background image data URL (persisted)
+  const [skyboxUrl, setSkyboxUrl] = useState(null);
 
   // Interaction state
   const [draggingMode, setDraggingMode] = useState(null); // 'vase' | 'camera' | null
@@ -241,6 +291,21 @@ export default function App() {
         }
       } catch (e) {
         console.warn('[App] storage persist request failed', e);
+      }
+    })();
+  }, []);
+
+  // Load saved background image (skybox) once
+  useEffect(() => {
+    (async () => {
+      try { await textureStore.ready(); } catch {}
+      try {
+        const dataUrl = await textureStore.getItem('skybox:background');
+        if (typeof dataUrl === 'string' && dataUrl.startsWith('data:')) {
+          setSkyboxUrl(dataUrl);
+        }
+      } catch (e) {
+        console.warn('[App] Failed to load saved skybox', e);
       }
     })();
   }, []);
@@ -1139,6 +1204,23 @@ export default function App() {
             setTextureSourcesForVase(activeVaseIndex, s => ({ ...s, upload: c }));
           }}
           onUploadSetActive={() => setActiveBaseLayerForVase(activeVaseIndex, 'upload')}
+          // Background (skybox)
+          hasSkybox={!!skyboxUrl}
+          onSkyboxSelected={async (dataUrl) => {
+            try { await textureStore.ready(); } catch {}
+            try {
+              await textureStore.setItem('skybox:background', dataUrl);
+              setSkyboxUrl(dataUrl);
+            } catch (e) {
+              console.error('[App] Failed to save skybox', e);
+              alert('Failed to save background image.');
+            }
+          }}
+          onClearSkybox={async () => {
+            try { await textureStore.ready(); } catch {}
+            try { await textureStore.removeItem('skybox:background'); } catch {}
+            setSkyboxUrl(null);
+          }}
         />
       )}
 
@@ -1182,6 +1264,7 @@ export default function App() {
         <Canvas
           camera={{ position: appMode === 'title' ? [TITLE_CAMERA_POS.x, TITLE_CAMERA_POS.y, TITLE_CAMERA_POS.z] : [0, CAMERA_HEIGHT, INITIAL_CAMERA_Z], fov: 50 }}
         >
+        {skyboxUrl ? <SceneBackgroundImage url={skyboxUrl} /> : null}
         <ambientLight intensity={0.6} />
         <directionalLight position={[2, 4, 2]} intensity={1} />
         <Physics

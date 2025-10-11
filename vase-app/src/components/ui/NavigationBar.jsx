@@ -28,6 +28,10 @@ export default function NavigationBar({
   // New: upload handlers
   onUploadCanvas,
   onUploadSetActive,
+  // New: background (skybox) handlers
+  hasSkybox,
+  onSkyboxSelected, // receives a data URL string
+  onClearSkybox,
   // If true, keep destroy button enabled even while locked (to allow re-trigger)
   allowDestroyWhileLocked = false,
 }) {
@@ -39,6 +43,8 @@ export default function NavigationBar({
   const streamRef = useRef(null);
   // Hidden file input for upload
   const uploadInputRef = useRef(null);
+  // Hidden file input for background image
+  const bgInputRef = useRef(null);
 
   // Try to detect if device has multiple cameras
   useEffect(() => {
@@ -189,6 +195,39 @@ export default function NavigationBar({
     }
   };
 
+  // --- Background (skybox) handling ---
+  const handleBackgroundClick = () => {
+    if (isLocked || isResetting) return;
+    if (hasSkybox) {
+      onClearSkybox && onClearSkybox();
+    } else {
+      bgInputRef.current?.click();
+    }
+  };
+
+  const handleBackgroundChange = (e) => {
+    const file = e.target.files?.[0];
+    // Allow re-choosing same file later
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result;
+        if (typeof dataUrl === 'string') {
+          onSkyboxSelected && onSkyboxSelected(dataUrl);
+        }
+      };
+      reader.onerror = () => {
+        alert('Failed to read image file.');
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      console.error('[NavigationBar] Background upload failed:', err);
+      alert('Failed to load background image. See console for details.');
+    }
+  };
+
   return (
     <div
       ref={barRef}
@@ -286,6 +325,16 @@ export default function NavigationBar({
         >
           photo
         </UIButton>
+        {/* New: Background toggle button */}
+        <UIButton
+          animated
+          onClick={handleBackgroundClick}
+          disabled={isLocked || isResetting}
+          style={{ fontSize: 14 }}
+          title={hasSkybox ? 'remove background' : 'set background'}
+        >
+          background
+        </UIButton>
       </div>
 
       {/* Hidden color input */}
@@ -302,6 +351,14 @@ export default function NavigationBar({
         type="file"
         accept="image/*"
         onChange={handleUploadChange}
+        style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 0, height: 0 }}
+      />
+      {/* Hidden background input */}
+      <input
+        ref={bgInputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleBackgroundChange}
         style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 0, height: 0 }}
       />
 
